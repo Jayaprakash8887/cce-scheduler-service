@@ -6,35 +6,39 @@ Comprehensive reference for all database tables, entities, enums, Kafka message 
 
 ## 1. Database Tables
 
-### 1.1 `scheduler_lease` — Leader Election & Heartbeat
+### 1.1 `scheduler_lease` — Partition Leader Election & Heartbeat
 
-Singleton-row table used for distributed leader election coordination and heartbeat tracking. Only one row ever exists.
+Multi-row table used for distributed partitioned leader election and heartbeat tracking. One row exists **per partition** (default: 1 row when `total-partitions=1`).
 
 **Migration:** `V1__create_scheduler_lease.sql`  
 **Owner:** Scheduler Service (read-write)
 
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
-| `id` | `UUID` | No | `gen_random_uuid()` | Primary key (singleton — always the same row) |
-| `leader_id` | `VARCHAR` | Yes | — | Hostname or instance ID of the current leader. `NULL` when no leader is active. |
-| `last_heartbeat` | `TIMESTAMPTZ` | Yes | — | Last time the leader updated this row. Used for staleness detection. |
+| `id` | `UUID` | No | `gen_random_uuid()` | Primary key |
+| `partition_index` | `INTEGER` | No | `0` | Partition number this row represents (0-based) |
+| `leader_id` | `VARCHAR` | Yes | — | Hostname or instance ID of the current partition leader. `NULL` when no leader is active. |
+| `last_heartbeat` | `TIMESTAMPTZ` | Yes | — | Last time the partition leader updated this row. Used for staleness detection. |
 | `lease_expires_at` | `TIMESTAMPTZ` | Yes | — | When the current lease expires. Computed as `last_heartbeat + leaseDurationSeconds`. |
 
 **Constraints:**
 - `PK`: `id`
+- `UNIQUE`: `partition_index`
 
-**Singleton Pattern:** On startup, the migration inserts exactly one row. All subsequent operations are `UPDATE` — never `INSERT` or `DELETE`.
+**Row-per-partition pattern:** On startup, the migration inserts row(s) for configured partitions. When scaling, a new migration or application startup logic upserts additional partition rows. All subsequent operations are `UPDATE` — never `DELETE`.
 
 ```sql
 CREATE TABLE scheduler_lease (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    partition_index   INTEGER NOT NULL DEFAULT 0,
     leader_id        VARCHAR,
     last_heartbeat   TIMESTAMPTZ,
-    lease_expires_at TIMESTAMPTZ
+    lease_expires_at TIMESTAMPTZ,
+    CONSTRAINT uq_scheduler_lease_partition UNIQUE (partition_index)
 );
 
--- Insert singleton row
-INSERT INTO scheduler_lease (id) VALUES (gen_random_uuid());
+-- Insert default partition row (single-leader mode)
+INSERT INTO scheduler_lease (id, partition_index) VALUES (gen_random_uuid(), 0);
 ```
 
 ### 1.2 `step_instance` — Read-Only View (Owned by Compliance Service)
@@ -128,10 +132,11 @@ All properties are under the `cce.scheduler` prefix.
 | Property | Type | Default | Min | Max | Description |
 |----------|------|---------|-----|-----|-------------|
 | `scan-interval` | `long` (ms) | `5000` | `1000` | `300000` | Delay between scan cycles (`fixedDelay`) |
-| `batch-size` | `int` | `100` | `1` | `1000` | Max steps per scan cycle |
+| `batch-size` | `int` | `100` | `1` | `1000` | Max steps per scan cycle per partition |
 | `lease-duration-seconds` | `int` | `30` | `10` | `300` | Lease expiry for leader heartbeat |
 | `leader-retry-interval` | `long` (ms) | `5000` | `1000` | `60000` | How often standby retries advisory lock |
-| `advisory-lock-key` | `long` | `100001` | — | — | PostgreSQL advisory lock key (unique to this service) |
+| `advisory-lock-key` | `long` | `100001` | — | — | Base PostgreSQL advisory lock key. Partitions use keys `advisory-lock-key + 0` through `advisory-lock-key + total-partitions - 1`. |
+| `total-partitions` | `int` | `1` | `1` | `64` | Number of scan partitions. Each partition is an independent advisory lock. `1` = single-leader mode (default). Increase for horizontal scaling. |
 
 ---
 
@@ -139,9 +144,9 @@ All properties are under the `cce.scheduler` prefix.
 
 | Metric Name | Type | Tags | Description |
 |-------------|------|------|-------------|
-| `cce.scheduler.scan.duration` | Timer | — | Time spent per scan cycle (query + publish) |
-| `cce.scheduler.scan.steps` | Counter | `transition_type` | Number of steps found per transition type |
-| `cce.scheduler.publish.success` | Counter | `transition_type` | Successful Kafka publishes per type |
-| `cce.scheduler.publish.failure` | Counter | `transition_type` | Failed Kafka publishes per type |
-| `cce.scheduler.leader.status` | Gauge | — | `1` = leader, `0` = standby |
-| `cce.scheduler.cycle.count` | Counter | — | Total scan cycles executed (including empty ones) |
+| `cce.scheduler.scan.duration` | Timer | `partition` | Time spent per scan cycle (query + publish) |
+| `cce.scheduler.scan.steps` | Counter | `transition_type`, `partition` | Number of steps found per transition type |
+| `cce.scheduler.publish.success` | Counter | `transition_type`, `partition` | Successful Kafka publishes per type |
+| `cce.scheduler.publish.failure` | Counter | `transition_type`, `partition` | Failed Kafka publishes per type |
+| `cce.scheduler.leader.status` | Gauge | `partition` | `1` = partition leader, `0` = standby |
+| `cce.scheduler.cycle.count` | Counter | `partition` | Total scan cycles executed (including empty ones) |

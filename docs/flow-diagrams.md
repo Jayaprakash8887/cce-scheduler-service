@@ -6,7 +6,7 @@ All diagrams use Mermaid syntax for rendering in GitHub/IDE preview.
 
 ## 1. Scheduler Main Loop
 
-The core scan-publish cycle that runs on every `fixedDelay` interval.
+The core scan-publish cycle that runs on every `fixedDelay` interval. Each instance scans only its assigned partition.
 
 ```mermaid
 sequenceDiagram
@@ -20,64 +20,64 @@ sequenceDiagram
 
     loop fixedDelay (5s default)
         SL->>Leader: isLeader()?
-        alt Not leader
+        alt Not a partition leader
             SL->>Metrics: Record cycle (idle)
             Note over SL: Skip - standby mode
-        else Is leader
-            SL->>Scanner: scan(batchSize)
-            Scanner->>DB: SELECT step_instance<br/>WHERE state/date thresholds met<br/>ORDER BY threshold ASC<br/>LIMIT batchSize
+        else Is partition leader (partitionIndex=P)
+            SL->>Scanner: scan(batchSize, P, totalPartitions)
+            Scanner->>DB: SELECT step_instance<br/>WHERE state/date thresholds met<br/>AND MOD(ABS(HASHTEXT(protocol_instance_id)), N) = P<br/>ORDER BY threshold ASC<br/>LIMIT batchSize
             DB-->>Scanner: List of StepInstance
             Scanner-->>SL: List of DueStep
 
             alt Empty batch
-                SL->>Metrics: Record cycle (empty)
+                SL->>Metrics: Record cycle (empty, partition=P)
             else Steps found
                 loop For each DueStep
                     SL->>Publisher: publish(dueStep)
                     Publisher->>Kafka: Send SchedulerTriggerMessage<br/>key=protocolInstanceId
                     Kafka-->>Publisher: Ack
-                    Publisher->>Metrics: publish.success++
+                    Publisher->>Metrics: publish.success++ (partition=P)
                 end
             end
 
-            SL->>Leader: updateHeartbeat()
-            Leader->>DB: UPDATE scheduler_lease<br/>SET last_heartbeat=now()
-            SL->>Metrics: Record cycle (scan duration, batch size)
+            SL->>Leader: updateHeartbeat(P)
+            Leader->>DB: UPDATE scheduler_lease<br/>SET last_heartbeat=now()<br/>WHERE partition_index=P
+            SL->>Metrics: Record cycle (scan duration, batch size, partition=P)
         end
     end
 ```
 
 ---
 
-## 2. Leader Election Lifecycle
+## 2. Partitioned Leader Election Lifecycle
 
 ```mermaid
 flowchart TD
     A["Service Startup"] --> B["Create dedicated<br/>JDBC connection"]
-    B --> C{"pg_try_advisory_lock<br/>(lockKey)?"}
-    C -->|"Acquired"| D["leader = true"]
-    C -->|"Not acquired"| E["leader = false<br/>(standby)"]
+    B --> C{"For i in 0..totalPartitions-1:<br/>pg_try_advisory_lock<br/>(lockKey + i)?"}
+    C -->|"Acquired lock i"| D["partitionIndex = i<br/>leader = true"]
+    C -->|"No lock acquired"| E["leader = false<br/>(standby)"]
 
-    D --> F["Update scheduler_lease<br/>leader_id, last_heartbeat"]
-    F --> G["Start scan loop"]
+    D --> F["Update scheduler_lease<br/>row for partition i"]
+    F --> G["Start scan loop<br/>(partition-filtered)"]
 
     E --> H["Wait leaderRetryInterval"]
     H --> C
 
     G --> I{"Scan cycle<br/>completed?"}
-    I -->|"Yes"| J["Update heartbeat"]
+    I -->|"Yes"| J["Update heartbeat<br/>for partition i"]
     J --> K["Wait fixedDelay"]
     K --> I
 
     subgraph Shutdown
-        L["@PreDestroy"] --> M["Release advisory lock"]
+        L["@PreDestroy"] --> M["Release advisory lock i"]
         M --> N["Close dedicated connection"]
     end
 
     subgraph Failover
-        O["Leader dies"] --> P["PG connection drops"]
-        P --> Q["Advisory lock released<br/>automatically"]
-        Q --> R["Standby acquires lock<br/>on next retry"]
+        O["Partition leader dies"] --> P["PG connection drops"]
+        P --> Q["Advisory lock i released<br/>automatically"]
+        Q --> R["Standby acquires lock i<br/>on next retry"]
         R --> D
     end
 
@@ -93,8 +93,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["DueStepScanner.scan()"] --> B["Query PostgreSQL"]
-    B --> C["SELECT steps WHERE<br/>(PENDING AND dueDate ≤ now) OR<br/>(DUE AND overdueDate ≤ now) OR<br/>(OVERDUE AND missedDate ≤ now)<br/>ORDER BY threshold ASC<br/>LIMIT batchSize"]
+    A["DueStepScanner.scan(batchSize, P, N)"] --> B["Query PostgreSQL"]
+    B --> C["SELECT steps WHERE<br/>(PENDING AND dueDate ≤ now) OR<br/>(DUE AND overdueDate ≤ now) OR<br/>(OVERDUE AND missedDate ≤ now)<br/>AND MOD(ABS(HASHTEXT(protocol_instance_id::text)), N) = P<br/>ORDER BY threshold ASC<br/>LIMIT batchSize"]
     C --> D{"Results empty?"}
     D -->|"Yes"| E["Return empty list"]
     D -->|"No"| F["For each StepInstance"]
@@ -110,11 +110,13 @@ flowchart TD
 
     K --> L{"More steps?"}
     L -->|"Yes"| F
-    L -->|"No"| M["Return List<DueStep>"]
+    L -->|"No"| M["Return List of DueStep"]
 
     style A fill:#4A90D9,color:white
     style M fill:#27AE60,color:white
 ```
+
+> **P** = this instance’s `partitionIndex`, **N** = `totalPartitions`. When N=1, the `MOD(...)` clause is always 0 = P, effectively a no-op (full table scan).
 
 ---
 
@@ -147,31 +149,36 @@ graph LR
 
 ---
 
-## 5. Failover Scenario
+## 5. Failover Scenario (Partitioned)
 
 ```mermaid
 sequenceDiagram
-    participant L1 as Instance 1 (Leader)
-    participant L2 as Instance 2 (Standby)
+    participant L1 as Instance A (Partition 0)
+    participant L2 as Instance B (Partition 1)
+    participant L3 as Instance C (Standby)
     participant PG as PostgreSQL
     participant Kafka as Kafka
 
-    Note over L1,PG: Normal operation
-    L1->>PG: Hold advisory lock
-    L1->>PG: Scan step_instance
-    L1->>Kafka: Publish transitions
+    Note over L1,L2: Normal operation — 2 partitions active
+    L1->>PG: Hold advisory lock 100001 (partition 0)
+    L2->>PG: Hold advisory lock 100002 (partition 1)
+    L1->>PG: Scan step_instance (partition 0)
+    L2->>PG: Scan step_instance (partition 1)
+    L1->>Kafka: Publish transitions (partition 0)
+    L2->>Kafka: Publish transitions (partition 1)
 
-    Note over L1: Instance 1 crashes
+    Note over L1: Instance A crashes
     L1--xPG: Connection drops
-    Note over PG: Advisory lock auto-released
+    Note over PG: Advisory lock 100001 auto-released
 
-    L2->>PG: pg_try_advisory_lock()
-    PG-->>L2: Lock acquired!
-    Note over L2: Becomes leader
+    L3->>PG: pg_try_advisory_lock(100001)
+    PG-->>L3: Lock acquired!
+    Note over L3: Becomes partition 0 leader
 
-    L2->>PG: Update scheduler_lease<br/>leader_id = instance-2
-    L2->>PG: Scan step_instance
-    L2->>Kafka: Publish transitions
+    L3->>PG: Update scheduler_lease<br/>partition_index=0, leader_id=C
+    L3->>PG: Scan step_instance (partition 0)
+    L3->>Kafka: Publish transitions (partition 0)
 
-    Note over L2,Kafka: Compliance Service handles<br/>any duplicate messages<br/>idempotently
+    Note over L2,L3: Both partitions active again
+    Note over Kafka: Compliance Service handles<br/>any duplicate messages<br/>idempotently
 ```

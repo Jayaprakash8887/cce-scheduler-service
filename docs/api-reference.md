@@ -47,6 +47,8 @@ Returns aggregate health status including custom `leaderElection` indicator.
       "status": "UP",
       "details": {
         "leader": true,
+        "partitionIndex": 0,
+        "totalPartitions": 3,
         "leaderId": "scheduler-instance-1",
         "lastHeartbeat": "2026-03-25T10:00:05Z",
         "leaseExpiresAt": "2026-03-25T10:00:35Z"
@@ -66,6 +68,8 @@ Returns aggregate health status including custom `leaderElection` indicator.
       "status": "UP",
       "details": {
         "leader": false,
+        "partitionIndex": null,
+        "totalPartitions": 3,
         "leaderId": null,
         "lastHeartbeat": null,
         "leaseExpiresAt": null
@@ -75,7 +79,7 @@ Returns aggregate health status including custom `leaderElection` indicator.
 }
 ```
 
-> **Note:** `leaderElection.status` is `UP` as long as the election mechanism is functional — regardless of whether this instance is the leader. The `leader` field indicates the actual role.
+> **Note:** `leaderElection.status` is `UP` as long as the election mechanism is functional — regardless of whether this instance is a partition leader. The `leader` field indicates the actual role, and `partitionIndex` shows which partition this instance owns (`null` for standby).
 
 ---
 
@@ -88,26 +92,26 @@ Exposes all Micrometer metrics in Prometheus scrape format. Key scheduler-specif
 ```
 # HELP cce_scheduler_scan_duration_seconds Time spent per scan cycle
 # TYPE cce_scheduler_scan_duration_seconds summary
-cce_scheduler_scan_duration_seconds_count 120.0
-cce_scheduler_scan_duration_seconds_sum 3.456
+cce_scheduler_scan_duration_seconds_count{partition="0"} 120.0
+cce_scheduler_scan_duration_seconds_sum{partition="0"} 3.456
 
 # HELP cce_scheduler_scan_steps_total Steps found per transition type
 # TYPE cce_scheduler_scan_steps_total counter
-cce_scheduler_scan_steps_total{transition_type="PENDING_TO_DUE"} 45.0
-cce_scheduler_scan_steps_total{transition_type="DUE_TO_OVERDUE"} 12.0
-cce_scheduler_scan_steps_total{transition_type="OVERDUE_TO_MISSED"} 3.0
+cce_scheduler_scan_steps_total{transition_type="PENDING_TO_DUE",partition="0"} 45.0
+cce_scheduler_scan_steps_total{transition_type="DUE_TO_OVERDUE",partition="0"} 12.0
+cce_scheduler_scan_steps_total{transition_type="OVERDUE_TO_MISSED",partition="0"} 3.0
 
 # HELP cce_scheduler_publish_success_total Successful Kafka publishes
 # TYPE cce_scheduler_publish_success_total counter
-cce_scheduler_publish_success_total{transition_type="PENDING_TO_DUE"} 45.0
+cce_scheduler_publish_success_total{transition_type="PENDING_TO_DUE",partition="0"} 45.0
 
 # HELP cce_scheduler_leader_status Current leader status
 # TYPE cce_scheduler_leader_status gauge
-cce_scheduler_leader_status 1.0
+cce_scheduler_leader_status{partition="0"} 1.0
 
 # HELP cce_scheduler_cycle_count_total Total scan cycles executed
 # TYPE cce_scheduler_cycle_count_total counter
-cce_scheduler_cycle_count_total 120.0
+cce_scheduler_cycle_count_total{partition="0"} 120.0
 ```
 
 ---

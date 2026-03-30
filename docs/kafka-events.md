@@ -16,7 +16,7 @@ The Scheduler Service produces to exactly **one** Kafka topic. It does not consu
 | **Value Format** | JSON (`SchedulerTriggerMessage`) |
 | **Partitions** | 25 (matches Compliance Service topic configuration) |
 | **Replication Factor** | 3 (production) / 1 (local dev) |
-| **Guarantees** | At-least-once delivery (idempotent producer, synchronous publish) |
+| **Guarantees** | At-least-once delivery (idempotent producer, synchronous publish). Partition-safe — all transitions for a `protocolInstanceId` are always produced by the same Scheduler instance (deterministic hash partitioning). |
 
 ---
 
@@ -141,7 +141,7 @@ The Compliance Service consumes from `cce.scheduler.triggers` with these expecta
 | **At-least-once delivery** | Synchronous publish + idempotent producer |
 | **Idempotency (producer)** | `enable.idempotence=true` prevents duplicate publishes on retry |
 | **Idempotency (consumer)** | Compliance Service checks current step state before applying transition |
-| **Ordering (per partition)** | Key = `protocolInstanceId` ensures all transitions for a protocol are ordered |
+| **Ordering (per partition)** | Key = `protocolInstanceId` ensures all transitions for a protocol are ordered. The Scheduler’s hash-partitioning by `protocol_instance_id` guarantees a given protocol is always scanned by the same Scheduler instance, preserving transition ordering even with multiple concurrent instances. |
 | **Durability** | `acks=all` waits for all ISR replicas |
 
 ---

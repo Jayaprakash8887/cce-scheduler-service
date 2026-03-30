@@ -114,6 +114,7 @@ cce:
     lease-duration-seconds: ${SCHEDULER_LEASE_DURATION:30}
     leader-retry-interval: ${SCHEDULER_LEADER_RETRY:5000}
     advisory-lock-key: ${SCHEDULER_LOCK_KEY:100001}
+    total-partitions: ${SCHEDULER_TOTAL_PARTITIONS:1}
   kafka:
     topics:
       scheduler-triggers: ${KAFKA_TOPIC_SCHEDULER_TRIGGERS:cce.scheduler.triggers}
@@ -150,7 +151,8 @@ management:
 | `SCHEDULER_BATCH_SIZE` | `100` | Max steps per scan cycle |
 | `SCHEDULER_LEASE_DURATION` | `30` | Lease expiry in seconds |
 | `SCHEDULER_LEADER_RETRY` | `5000` | Leader retry interval in milliseconds |
-| `SCHEDULER_LOCK_KEY` | `100001` | PostgreSQL advisory lock key |
+| `SCHEDULER_LOCK_KEY` | `100001` | Base PostgreSQL advisory lock key. Partitions use keys `LOCK_KEY + 0` through `LOCK_KEY + TOTAL_PARTITIONS - 1`. |
+| `SCHEDULER_TOTAL_PARTITIONS` | `1` | Number of scan partitions for horizontal scaling. `1` = single-leader (default). |
 
 ## 4. Project Structure
 
@@ -244,5 +246,6 @@ docker run -p 8083:8083 \
   -e DB_USERNAME=cce_user \
   -e DB_PASSWORD=cce_pass \
   -e KAFKA_BOOTSTRAP_SERVERS=host.docker.internal:9092 \
+  -e SCHEDULER_TOTAL_PARTITIONS=1 \
   cce-scheduler-service
 ```

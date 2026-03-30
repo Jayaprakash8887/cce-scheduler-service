@@ -7,9 +7,9 @@ The **CCE Scheduler Service** is a headless background service within the CCE pl
 ```mermaid
 graph TB
     subgraph CCE Scheduler Service
-        LEADER["Leader Election<br/>(pg_advisory_lock)"]
+        LEADER["Partition Leader Election<br/>(pg_advisory_lock × N)"]
         LOOP["Scheduler Loop<br/>(@Scheduled)"]
-        SCANNER["Due Step Scanner"]
+        SCANNER["Due Step Scanner<br/>(partition-filtered)"]
         PUBLISHER["Transition Publisher"]
         HEALTH["Health Indicators"]
     end
@@ -145,41 +145,58 @@ src/integrationTest/java/org/openphc/cce/scheduler/  # Integration tests
 
 The core loop runs on a `@Scheduled(fixedDelay)` cadence (default: 5 seconds). The `fixedDelay` ensures no overlap — the next cycle starts only after the previous cycle completes.
 
+Each instance only scans the **partition** it owns (determined by its advisory lock index). With `total-partitions=1` (default), the behavior is identical to a single-leader model scanning the full table.
+
 ```
-1. Leader check (pg_advisory_lock held?)
-   - If not leader → skip this cycle, return immediately
-2. DueStepScanner.scan(batchSize)
+1. Partition leader check (pg_advisory_lock held for this partition?)
+   - If not a partition leader → skip this cycle, return immediately
+2. DueStepScanner.scan(batchSize, partitionIndex, totalPartitions)
    - Query step_instance for rows where time thresholds are met
+   - Filter: MOD(ABS(HASHTEXT(protocol_instance_id::text)), totalPartitions) = partitionIndex
    - Determine transition type for each row
    - Return List<DueStep>
 3. TransitionPublisher.publish(dueSteps)
    - For each DueStep: build SchedulerTriggerMessage, publish to Kafka synchronously
    - Track success/failure counts
-4. Update scheduler_lease heartbeat
-5. Record metrics (scan duration, batch size, transitions by type)
+4. Update scheduler_lease heartbeat for this partition
+5. Record metrics (scan duration, batch size, transitions by type, partition index)
 6. Wait fixedDelay → repeat
 ```
 
-### 4.2 Leader Election Lifecycle
+### 4.2 Partitioned Leader Election Lifecycle
+
+The service supports **partitioned multi-leader** concurrency via multiple PostgreSQL advisory locks. Each partition is an independent scan domain — N partitions allow up to N instances to process concurrently.
+
+With `total-partitions=1` (default), the behavior is identical to the original single-leader model.
 
 ```
 Startup:
 1. Create dedicated JDBC connection (outside HikariCP pool)
-2. Call pg_try_advisory_lock(lockKey) — non-blocking
-3. If acquired → leader = true, update scheduler_lease
-4. If not acquired → leader = false, enter standby
+2. For i in 0..totalPartitions-1:
+   a. Call pg_try_advisory_lock(advisoryLockKey + i) — non-blocking
+   b. If acquired → partitionIndex = i, leader = true, update scheduler_lease row for partition i
+   c. Break on first acquired lock
+3. If no lock acquired → leader = false, enter standby
 
 Standby:
-- Retry pg_try_advisory_lock every leaderRetryInterval (default: 5s)
+- Retry all unacquired locks every leaderRetryInterval (default: 5s)
 - Scan loop skips processing on each cycle
 
 Failover:
-- When leader instance dies, PG connection drops, advisory lock is released
-- Standby instance acquires lock on next retry → becomes leader
+- When a partition leader dies, PG connection drops, its advisory lock is released
+- Any standby instance acquires the orphaned lock on next retry → becomes leader for that partition
 
 Shutdown (@PreDestroy):
-- Release advisory lock
+- Release held advisory lock
 - Close dedicated connection
+```
+
+**Example with 3 partitions:**
+```
+Instance A → acquires lock 100001 → partitionIndex=0 → scans partition 0
+Instance B → acquires lock 100002 → partitionIndex=1 → scans partition 1
+Instance C → acquires lock 100003 → partitionIndex=2 → scans partition 2
+Instance D → no lock available    → standby (failover spare)
 ```
 
 ### 4.3 Shared Database Access
@@ -188,8 +205,8 @@ The Scheduler connects to the **same PostgreSQL database** (`cce_collector`) as 
 
 | Table | Owner | Scheduler Access | Purpose |
 |---|---|---|---|
-| `step_instance` | Compliance Service | **Read-only** | Query for due transitions |
-| `scheduler_lease` | Scheduler Service | **Read-write** | Leader election + heartbeat |
+| `step_instance` | Compliance Service | **Read-only** | Query for due transitions (partition-filtered) |
+| `scheduler_lease` | Scheduler Service | **Read-write** | Partition leader heartbeats (one row per partition) |
 | All other tables | Compliance Service | **No access** | Not used by Scheduler |
 
 **Important:** The Scheduler uses `@Immutable` on its `StepInstance` entity to prevent accidental writes. The actual state transitions are performed by the Compliance Service after consuming `SchedulerTriggerMessage` from Kafka.
@@ -201,9 +218,9 @@ The Scheduler connects to the **same PostgreSQL database** (`cce_collector`) as 
 | Thread Pool | Size | Purpose |
 |---|---|---|
 | `scheduler-pool` | 2 | @Scheduled task execution (scan loop + heartbeat) |
-| HikariCP | 5 | JDBC connections for step_instance queries and lease updates |
+| HikariCP | 5 | JDBC connections for partition-filtered step_instance queries and lease updates |
 | Kafka producer I/O | 1 | Kafka message publishing (synchronous) |
-| Advisory lock | 1 | Dedicated JDBC connection for `pg_advisory_lock` (not from HikariCP) |
+| Advisory lock | 1 | Dedicated JDBC connection for `pg_advisory_lock` (not from HikariCP) — holds one lock per instance |
 
 ---
 
@@ -213,7 +230,7 @@ The Scheduler connects to the **same PostgreSQL database** (`cce_collector`) as 
 |---|---|---|
 | PostgreSQL unreachable | Log error, skip this cycle, retry on next interval | Service remains running; catches up when DB recovers |
 | Kafka broker unreachable | Log error per message, continue to next step in batch | Some transitions delayed; Kafka retries handle transient failures |
-| Advisory lock lost | Detect on next heartbeat, set leader=false, enter standby | Another instance takes over |
+| Advisory lock lost | Detect on next heartbeat, set leader=false, enter standby | Another instance takes over the orphaned partition |
 | Stale step (already transitioned) | Compliance Service ignores duplicate `SchedulerTriggerMessage` | No impact — idempotent consumer |
 | Exception in scan loop | Catch-all in `@Scheduled` method — never terminates the scheduled task | Logged, metrics incremented, next cycle proceeds normally |
 
@@ -225,18 +242,18 @@ The Scheduler connects to the **same PostgreSQL database** (`cce_collector`) as 
 
 | Metric | Type | Tags | Description |
 |---|---|---|---|
-| `cce.scheduler.scan.duration` | Timer | — | Time spent per scan cycle |
-| `cce.scheduler.scan.steps` | Counter | `transition_type` | Steps found per transition type |
-| `cce.scheduler.publish.success` | Counter | `transition_type` | Successful Kafka publishes |
-| `cce.scheduler.publish.failure` | Counter | `transition_type` | Failed Kafka publishes |
-| `cce.scheduler.leader.status` | Gauge | — | 1 = leader, 0 = standby |
-| `cce.scheduler.cycle.count` | Counter | — | Total scan cycles executed |
+| `cce.scheduler.scan.duration` | Timer | `partition` | Time spent per scan cycle |
+| `cce.scheduler.scan.steps` | Counter | `transition_type`, `partition` | Steps found per transition type |
+| `cce.scheduler.publish.success` | Counter | `transition_type`, `partition` | Successful Kafka publishes |
+| `cce.scheduler.publish.failure` | Counter | `transition_type`, `partition` | Failed Kafka publishes |
+| `cce.scheduler.leader.status` | Gauge | `partition` | 1 = partition leader, 0 = standby |
+| `cce.scheduler.cycle.count` | Counter | `partition` | Total scan cycles executed |
 
 ### 7.2 Health Indicators
 
 | Indicator | Details |
 |---|---|
-| `leaderElection` | UP if leader election is functioning (regardless of leader/standby status). Reports `leader: true/false`, `lastHeartbeat`. |
+| `leaderElection` | UP if leader election is functioning (regardless of leader/standby status). Reports `leader: true/false`, `partitionIndex`, `totalPartitions`, `lastHeartbeat`. |
 | `db` (auto) | PostgreSQL connectivity |
 | `kafka` (auto) | Kafka broker connectivity |
 
@@ -247,13 +264,31 @@ correlationId: sched-DUE_TO_OVERDUE-770e8400
 stepInstanceId: 770e8400-e29b-41d4-a716-446655440002
 transitionType: DUE_TO_OVERDUE
 leaderStatus: true
+partitionIndex: 0
+totalPartitions: 3
 ```
 
 ---
 
 ## 8. Scaling & Deployment
 
-- **Active-standby:** Deploy 2+ instances. Only the leader processes; standby instances wait for advisory lock.
-- **Failover time:** ≤ `leaderRetryInterval` (default 5 seconds).
-- **No horizontal scaling of processing** — only one instance is active at a time. This is by design to prevent duplicate transitions.
+### 8.1 Partitioned Multi-Leader Model
+
+The Scheduler supports **partitioned multi-leader** concurrency for horizontal scaling. Instead of a single advisory lock, the service uses N locks (one per partition). Each instance acquires one lock on startup and scans only the steps that hash to its partition.
+
+- **Default:** `total-partitions=1` — single-leader mode, identical to a traditional active-standby deployment.
+- **Scaled:** `total-partitions=N` with N+ replicas — up to N instances process concurrently, each scanning a disjoint subset of `protocol_instance_id` values.
+- **No StatefulSet required** — uses a regular Kubernetes Deployment. Partition assignment is dynamic via advisory lock acquisition order, not pod ordinal.
+- **Failover:** When a partition leader dies, any standby instance acquires the orphaned lock on its next retry (≤ `leaderRetryInterval`, default 5s).
+- **Zero overlap:** Each step's `protocol_instance_id` hashes to exactly one partition — `MOD(ABS(HASHTEXT(protocol_instance_id::text)), totalPartitions)`. No duplicate transitions across instances.
+- **Spare instances:** Deploy more replicas than partitions for standby failover capacity.
 - **Stateless between runs** — all state is in PostgreSQL. An instance can be replaced at any time.
+
+### 8.2 Deployment Examples
+
+| Scenario | `total-partitions` | `replicas` | Behavior |
+|---|---|---|---|
+| Single instance | `1` | `1` | One leader, no failover |
+| HA (no parallelism) | `1` | `2` | Active-standby, automatic failover |
+| Parallel (3-way) | `3` | `3` | 3 concurrent leaders, each scans 1/3 of steps |
+| Parallel + HA | `3` | `5` | 3 leaders + 2 standby spares for failover |
