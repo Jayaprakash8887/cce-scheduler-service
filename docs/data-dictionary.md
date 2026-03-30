@@ -8,7 +8,7 @@ Comprehensive reference for all database tables, entities, enums, Kafka message 
 
 ### 1.1 `scheduler_lease` — Partition Leader Election & Heartbeat
 
-Multi-row table used for distributed partitioned leader election and heartbeat tracking. One row exists **per partition** (default: 1 row when `total-partitions=1`).
+Multi-row table used for distributed partitioned leader election and heartbeat tracking. One row exists **per partition** (default: 1 row when `total-partitions=1`). A single instance may own and update **multiple** partition rows via greedy lock acquisition.
 
 **Migration:** `V1__create_scheduler_lease.sql`  
 **Owner:** Scheduler Service (read-write)
@@ -136,7 +136,7 @@ All properties are under the `cce.scheduler` prefix.
 | `lease-duration-seconds` | `int` | `30` | `10` | `300` | Lease expiry for leader heartbeat |
 | `leader-retry-interval` | `long` (ms) | `5000` | `1000` | `60000` | How often standby retries advisory lock |
 | `advisory-lock-key` | `long` | `100001` | — | — | Base PostgreSQL advisory lock key. Partitions use keys `advisory-lock-key + 0` through `advisory-lock-key + total-partitions - 1`. |
-| `total-partitions` | `int` | `1` | `1` | `64` | Number of scan partitions. Each partition is an independent advisory lock. `1` = single-leader mode (default). Increase for horizontal scaling. |
+| `total-partitions` | `int` | `1` | `1` | `64` | Number of scan partitions. Each partition is an independent advisory lock. `1` = single-leader mode (default). Increase for horizontal scaling. Each instance acquires **all available** partition locks (greedy), so fewer instances than partitions is safe — no orphaned partitions. |
 
 ---
 

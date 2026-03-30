@@ -47,7 +47,28 @@ Returns aggregate health status including custom `leaderElection` indicator.
       "status": "UP",
       "details": {
         "leader": true,
-        "partitionIndex": 0,
+        "ownedPartitions": [0, 1],
+        "totalPartitions": 3,
+        "leaderId": "scheduler-instance-1",
+        "lastHeartbeat": "2026-03-25T10:00:05Z",
+        "leaseExpiresAt": "2026-03-25T10:00:35Z"
+      }
+    }
+  }
+}
+```
+
+**Instance owning all partitions (single-instance with total-partitions=3):**
+
+```json
+{
+  "status": "UP",
+  "components": {
+    "leaderElection": {
+      "status": "UP",
+      "details": {
+        "leader": true,
+        "ownedPartitions": [0, 1, 2],
         "totalPartitions": 3,
         "leaderId": "scheduler-instance-1",
         "lastHeartbeat": "2026-03-25T10:00:05Z",
@@ -68,7 +89,7 @@ Returns aggregate health status including custom `leaderElection` indicator.
       "status": "UP",
       "details": {
         "leader": false,
-        "partitionIndex": null,
+        "ownedPartitions": [],
         "totalPartitions": 3,
         "leaderId": null,
         "lastHeartbeat": null,
@@ -79,7 +100,7 @@ Returns aggregate health status including custom `leaderElection` indicator.
 }
 ```
 
-> **Note:** `leaderElection.status` is `UP` as long as the election mechanism is functional — regardless of whether this instance is a partition leader. The `leader` field indicates the actual role, and `partitionIndex` shows which partition this instance owns (`null` for standby).
+> **Note:** `leaderElection.status` is `UP` as long as the election mechanism is functional — regardless of whether this instance owns any partitions. The `leader` field indicates whether any partition is owned, and `ownedPartitions` lists exactly which partitions this instance processes.
 
 ---
 

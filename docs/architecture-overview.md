@@ -145,58 +145,81 @@ src/integrationTest/java/org/openphc/cce/scheduler/  # Integration tests
 
 The core loop runs on a `@Scheduled(fixedDelay)` cadence (default: 5 seconds). The `fixedDelay` ensures no overlap — the next cycle starts only after the previous cycle completes.
 
-Each instance only scans the **partition** it owns (determined by its advisory lock index). With `total-partitions=1` (default), the behavior is identical to a single-leader model scanning the full table.
+Each instance only scans the **partitions** it owns (determined by acquired advisory locks). A single instance may own multiple partitions. With `total-partitions=1` (default), the behavior is identical to a single-leader model scanning the full table.
 
 ```
-1. Partition leader check (pg_advisory_lock held for this partition?)
-   - If not a partition leader → skip this cycle, return immediately
-2. DueStepScanner.scan(batchSize, partitionIndex, totalPartitions)
-   - Query step_instance for rows where time thresholds are met
-   - Filter: MOD(ABS(HASHTEXT(protocol_instance_id::text)), totalPartitions) = partitionIndex
-   - Determine transition type for each row
-   - Return List<DueStep>
-3. TransitionPublisher.publish(dueSteps)
-   - For each DueStep: build SchedulerTriggerMessage, publish to Kafka synchronously
-   - Track success/failure counts
-4. Update scheduler_lease heartbeat for this partition
-5. Record metrics (scan duration, batch size, transitions by type, partition index)
-6. Wait fixedDelay → repeat
+1. Partition leader check (any pg_advisory_locks held?)
+   - If no locks held → skip this cycle, return immediately
+2. For each owned partition P in ownedPartitions:
+   a. DueStepScanner.scan(batchSize, P, totalPartitions)
+      - Query step_instance for rows where time thresholds are met
+      - Filter: MOD(ABS(HASHTEXT(protocol_instance_id::text)), totalPartitions) = P
+      - Determine transition type for each row
+      - Return List<DueStep>
+   b. TransitionPublisher.publish(dueSteps)
+      - For each DueStep: build SchedulerTriggerMessage, publish to Kafka synchronously
+      - Track success/failure counts
+   c. Update scheduler_lease heartbeat for partition P
+   d. Record metrics (scan duration, batch size, transitions by type, partition=P)
+3. Wait fixedDelay → repeat
 ```
 
 ### 4.2 Partitioned Leader Election Lifecycle
 
-The service supports **partitioned multi-leader** concurrency via multiple PostgreSQL advisory locks. Each partition is an independent scan domain — N partitions allow up to N instances to process concurrently.
+The service supports **greedy partitioned multi-leader** concurrency via multiple PostgreSQL advisory locks. Each partition is an independent scan domain — N partitions allow up to N instances to process concurrently. Each instance acquires **all available** locks on startup, so it may own multiple partitions. This guarantees zero orphaned partitions regardless of how many instances are deployed.
 
 With `total-partitions=1` (default), the behavior is identical to the original single-leader model.
 
 ```
 Startup:
 1. Create dedicated JDBC connection (outside HikariCP pool)
-2. For i in 0..totalPartitions-1:
+2. ownedPartitions = []
+3. For i in 0..totalPartitions-1:
    a. Call pg_try_advisory_lock(advisoryLockKey + i) — non-blocking
-   b. If acquired → partitionIndex = i, leader = true, update scheduler_lease row for partition i
-   c. Break on first acquired lock
-3. If no lock acquired → leader = false, enter standby
+   b. If acquired → add i to ownedPartitions, update scheduler_lease row for partition i
+4. If ownedPartitions is empty → standby
+   If ownedPartitions is non-empty → leader (scans all owned partitions)
 
 Standby:
 - Retry all unacquired locks every leaderRetryInterval (default: 5s)
 - Scan loop skips processing on each cycle
 
+Rebalancing on new instance joining:
+- New instances can only acquire locks not held by existing instances
+- To rebalance, an existing instance must be restarted (releases its locks)
+- Kubernetes rolling restart naturally rebalances partitions across instances
+
 Failover:
-- When a partition leader dies, PG connection drops, its advisory lock is released
-- Any standby instance acquires the orphaned lock on next retry → becomes leader for that partition
+- When an instance dies, PG connection drops, ALL its advisory locks are released
+- Surviving instances acquire the orphaned locks on next retry → no partitions left unprocessed
 
 Shutdown (@PreDestroy):
-- Release held advisory lock
+- Release all held advisory locks
 - Close dedicated connection
 ```
 
-**Example with 3 partitions:**
+**Example with 3 partitions, 3 instances (even distribution):**
 ```
-Instance A → acquires lock 100001 → partitionIndex=0 → scans partition 0
-Instance B → acquires lock 100002 → partitionIndex=1 → scans partition 1
-Instance C → acquires lock 100003 → partitionIndex=2 → scans partition 2
-Instance D → no lock available    → standby (failover spare)
+Instance A → acquires lock 100001 → owns [partition 0]
+Instance B → acquires lock 100002 → owns [partition 1]
+Instance C → acquires lock 100003 → owns [partition 2]
+```
+
+**Example with 3 partitions, 2 instances (greedy acquisition):**
+```
+Instance A (starts first) → acquires locks 100001, 100002, 100003 → owns [partition 0, 1, 2]
+Instance B (starts second) → all locks taken → standby
+```
+
+**Example with 3 partitions, 2 instances (near-simultaneous start):**
+```
+Instance A → acquires locks 100001, 100002 → owns [partition 0, 1]
+Instance B → acquires lock 100003 → owns [partition 2]
+```
+
+**Example with 3 partitions, 1 instance (safe — no orphans):**
+```
+Instance A → acquires locks 100001, 100002, 100003 → owns [partition 0, 1, 2] → scans all
 ```
 
 ### 4.3 Shared Database Access
@@ -220,7 +243,7 @@ The Scheduler connects to the **same PostgreSQL database** (`cce_collector`) as 
 | `scheduler-pool` | 2 | @Scheduled task execution (scan loop + heartbeat) |
 | HikariCP | 5 | JDBC connections for partition-filtered step_instance queries and lease updates |
 | Kafka producer I/O | 1 | Kafka message publishing (synchronous) |
-| Advisory lock | 1 | Dedicated JDBC connection for `pg_advisory_lock` (not from HikariCP) — holds one lock per instance |
+| Advisory lock | 1 | Dedicated JDBC connection for `pg_advisory_lock` (not from HikariCP) — holds all acquired partition locks |
 
 ---
 
@@ -230,7 +253,7 @@ The Scheduler connects to the **same PostgreSQL database** (`cce_collector`) as 
 |---|---|---|
 | PostgreSQL unreachable | Log error, skip this cycle, retry on next interval | Service remains running; catches up when DB recovers |
 | Kafka broker unreachable | Log error per message, continue to next step in batch | Some transitions delayed; Kafka retries handle transient failures |
-| Advisory lock lost | Detect on next heartbeat, set leader=false, enter standby | Another instance takes over the orphaned partition |
+| Advisory lock lost | Detect on next heartbeat, release remaining locks, enter standby | Surviving instances acquire all orphaned partitions |
 | Stale step (already transitioned) | Compliance Service ignores duplicate `SchedulerTriggerMessage` | No impact — idempotent consumer |
 | Exception in scan loop | Catch-all in `@Scheduled` method — never terminates the scheduled task | Logged, metrics incremented, next cycle proceeds normally |
 
@@ -253,7 +276,7 @@ The Scheduler connects to the **same PostgreSQL database** (`cce_collector`) as 
 
 | Indicator | Details |
 |---|---|
-| `leaderElection` | UP if leader election is functioning (regardless of leader/standby status). Reports `leader: true/false`, `partitionIndex`, `totalPartitions`, `lastHeartbeat`. |
+| `leaderElection` | UP if leader election is functioning (regardless of leader/standby status). Reports `leader: true/false`, `ownedPartitions: [0,1]`, `totalPartitions`, `lastHeartbeat`. |
 | `db` (auto) | PostgreSQL connectivity |
 | `kafka` (auto) | Kafka broker connectivity |
 
@@ -264,7 +287,8 @@ correlationId: sched-DUE_TO_OVERDUE-770e8400
 stepInstanceId: 770e8400-e29b-41d4-a716-446655440002
 transitionType: DUE_TO_OVERDUE
 leaderStatus: true
-partitionIndex: 0
+ownedPartitions: [0,1]
+currentPartition: 0
 totalPartitions: 3
 ```
 
@@ -272,16 +296,16 @@ totalPartitions: 3
 
 ## 8. Scaling & Deployment
 
-### 8.1 Partitioned Multi-Leader Model
+### 8.1 Greedy Partitioned Multi-Leader Model
 
-The Scheduler supports **partitioned multi-leader** concurrency for horizontal scaling. Instead of a single advisory lock, the service uses N locks (one per partition). Each instance acquires one lock on startup and scans only the steps that hash to its partition.
+The Scheduler supports **greedy partitioned multi-leader** concurrency for horizontal scaling. Each instance acquires **all available** advisory locks on startup, so a single instance can own and process multiple partitions. This eliminates orphaned partitions when fewer instances than partitions are deployed.
 
 - **Default:** `total-partitions=1` — single-leader mode, identical to a traditional active-standby deployment.
-- **Scaled:** `total-partitions=N` with N+ replicas — up to N instances process concurrently, each scanning a disjoint subset of `protocol_instance_id` values.
-- **No StatefulSet required** — uses a regular Kubernetes Deployment. Partition assignment is dynamic via advisory lock acquisition order, not pod ordinal.
-- **Failover:** When a partition leader dies, any standby instance acquires the orphaned lock on its next retry (≤ `leaderRetryInterval`, default 5s).
-- **Zero overlap:** Each step's `protocol_instance_id` hashes to exactly one partition — `MOD(ABS(HASHTEXT(protocol_instance_id::text)), totalPartitions)`. No duplicate transitions across instances.
-- **Spare instances:** Deploy more replicas than partitions for standby failover capacity.
+- **Scaled:** `total-partitions=N` with any number of replicas — partitions are distributed greedily across available instances. Each instance scans all partitions it owns sequentially per cycle.
+- **No orphaned partitions:** Even with 1 instance and `total-partitions=3`, that instance owns all 3 partitions and scans the full table. No data is ever missed.
+- **No StatefulSet required** — uses a regular Kubernetes Deployment. Partition assignment is dynamic via greedy advisory lock acquisition.
+- **Failover:** When an instance dies, ALL its locks are released. Surviving instances acquire the orphaned locks on their next retry (≤ `leaderRetryInterval`, default 5s).
+- **Rebalancing:** Happens naturally during rolling restarts — restarted instances only acquire locks not yet held by others.
 - **Stateless between runs** — all state is in PostgreSQL. An instance can be replaced at any time.
 
 ### 8.2 Deployment Examples
@@ -291,4 +315,6 @@ The Scheduler supports **partitioned multi-leader** concurrency for horizontal s
 | Single instance | `1` | `1` | One leader, no failover |
 | HA (no parallelism) | `1` | `2` | Active-standby, automatic failover |
 | Parallel (3-way) | `3` | `3` | 3 concurrent leaders, each scans 1/3 of steps |
-| Parallel + HA | `3` | `5` | 3 leaders + 2 standby spares for failover |
+| Parallel + HA | `3` | `5` | 3 leaders (each owns 1 partition) + 2 standby spares |
+| Under-provisioned (safe) | `3` | `1` | 1 instance owns all 3 partitions, scans full table sequentially |
+| Under-provisioned (partial) | `3` | `2` | Partitions split ~2:1 across instances — no orphans |
