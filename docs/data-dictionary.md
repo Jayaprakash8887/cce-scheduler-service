@@ -90,7 +90,7 @@ The type of time-based transition the Scheduler requests.
 |-------|-----------|----------|-----------|
 | `PENDING_TO_DUE` | `PENDING` | `DUE` | `due_date ≤ now` |
 | `DUE_TO_OVERDUE` | `DUE` | `OVERDUE` | `overdue_date ≤ now` |
-| `OVERDUE_TO_MISSED` | `OVERDUE` | `MISSED` | `missed_date ≤ now` |
+| `OVERDUE_TO_MISSED` | `OVERDUE` | `MISSED` or `SKIPPED` | `missed_date ≤ now`. Compliance Service applies `MISSED` for `must` steps (with deviation) or `SKIPPED` for `could` steps (no deviation). |
 
 ---
 

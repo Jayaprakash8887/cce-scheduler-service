@@ -166,6 +166,35 @@ Each instance only scans the **partitions** it owns (determined by acquired advi
 
 ### 4.2 Partitioned Leader Election Lifecycle
 
+#### Why do we need this?
+
+Without partitioning, only **one instance** can scan the `step_instance` table at a time (single-leader). As the number of protocol instances grows, a single scanner becomes a throughput bottleneck. The Partitioned Leader Election Lifecycle allows **multiple instances to scan concurrently** by dividing the data space into non-overlapping partitions, each processed independently — achieving horizontal scale-out without duplicate processing or coordination overhead.
+
+#### What is a partition?
+
+A **partition** is a logical slice of the `step_instance` table determined by a hash of `protocol_instance_id`:
+
+```
+partition(row) = MOD(ABS(HASHTEXT(protocol_instance_id::text)), totalPartitions)
+```
+
+- `totalPartitions` (N) is set via configuration (`cce.scheduler.total-partitions`).
+- Each partition is identified by an index **P** in the range `[0, N-1]`.
+- A given `protocol_instance_id` always maps to the **same** partition, ensuring deterministic, conflict-free assignment without shared state.
+- Partitions are purely logical — no physical table partitioning is involved.
+
+#### What is the advisory lock for?
+
+Each partition is guarded by a **PostgreSQL session-level advisory lock** (`pg_try_advisory_lock(baseKey + P)`). The lock serves as:
+
+1. **Distributed mutex** — guarantees that exactly one instance scans a given partition at any point in time, preventing duplicate Kafka events.
+2. **Failure detector** — advisory locks are automatically released when the holding database connection drops (instance crash, network failure), enabling surviving instances to take over immediately.
+3. **Zero-infrastructure coordination** — no external system (ZooKeeper, etcd, Redis) is required; PostgreSQL itself provides the consensus.
+
+The lock is held for the **lifetime of the dedicated JDBC connection** (not per-transaction), so it persists across scan cycles without re-acquisition overhead.
+
+#### Concurrency model
+
 The service supports **greedy partitioned multi-leader** concurrency via multiple PostgreSQL advisory locks. Each partition is an independent scan domain — N partitions allow up to N instances to process concurrently. Each instance acquires **all available** locks on startup, so it may own multiple partitions. This guarantees zero orphaned partitions regardless of how many instances are deployed.
 
 With `total-partitions=1` (default), the behavior is identical to the original single-leader model.
@@ -216,6 +245,20 @@ Instance B (starts second) → all locks taken → standby
 Instance A → acquires locks 100001, 100002 → owns [partition 0, 1]
 Instance B → acquires lock 100003 → owns [partition 2]
 ```
+
+#### Balanced distribution strategy
+
+The greedy acquisition model prioritizes **zero orphaned partitions** over perfectly equal distribution. However, to improve fairness during near-simultaneous startup, each instance introduces a **randomized micro-delay** (`0–50ms`, configurable via `cce.scheduler.lock-acquire-delay-ms`) between consecutive lock acquisition attempts:
+
+```
+For i in 0..totalPartitions-1:
+   sleep(random(0, lockAcquireDelayMs))   // jitter between attempts
+   pg_try_advisory_lock(advisoryLockKey + i)
+```
+
+This staggering gives concurrent instances a window to interleave their acquisitions, yielding a statistically more even distribution without sacrificing the guarantee that all partitions are always owned.
+
+**For deterministic equal distribution**, use Kubernetes with `replicas = totalPartitions` and a rolling deployment strategy — each pod acquires exactly one partition as others have already claimed theirs by the time the next pod starts.
 
 **Example with 3 partitions, 1 instance (safe — no orphans):**
 ```

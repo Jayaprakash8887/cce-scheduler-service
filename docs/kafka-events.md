@@ -72,8 +72,8 @@ spring:
 | Value | Meaning | Compliance Service Effect |
 |---|---|---|
 | `PENDING_TO_DUE` | Step's `dueDate` has been reached | Update `step_instance.state` from `PENDING` to `DUE` |
-| `DUE_TO_OVERDUE` | Step's `overdueDate` has been reached | Update state to `OVERDUE`; create `deviation` record (type: `overdue`) |
-| `OVERDUE_TO_MISSED` | Step's `missedDate` has been reached | Update state to `MISSED`; create `deviation` record (type: `missed`) |
+| `DUE_TO_OVERDUE` | Step's `overdueDate` has been reached | Update state to `OVERDUE`; create `deviation` record (type: `OVERDUE`); evaluate intelligence actions |
+| `OVERDUE_TO_MISSED` | Step's `missedDate` has been reached | For `must` steps: update state to `MISSED`, create `deviation` record (type: `MISSED`), evaluate intelligence actions. For `could` steps: update state to `SKIPPED` (no deviation). The Compliance Service decides based on `requiredBehavior`. |
 
 ---
 
@@ -131,6 +131,8 @@ The Compliance Service consumes from `cce.scheduler.triggers` with these expecta
 | 3 | Idempotent processing | Duplicate messages for the same step+transition produce no side effects |
 | 4 | Kafka key = `protocolInstanceId` | Ensures per-protocol ordering within a partition |
 | 5 | `correlationid` for tracing | Propagated to MDC for structured logging |
+| 6 | `requiredBehavior` determines terminal state | On `OVERDUE_TO_MISSED`: `must` → `MISSED` + deviation; `could` → `SKIPPED` (no deviation) |
+| 7 | Intelligence action evaluation | On deviation creation (`DUE_TO_OVERDUE`, `OVERDUE_TO_MISSED`), the Compliance Service evaluates PlanDefinition intelligence actions and publishes `IntelligenceTriggerEvent` to `cce.intelligence.triggers` |
 
 ---
 
