@@ -55,9 +55,12 @@ sequenceDiagram
 flowchart TD
     A["Service Startup"] --> B["Create dedicated<br/>JDBC connection"]
     B --> C["ownedPartitions = []"]
-    C --> D{"For i in 0..totalPartitions-1:<br/>pg_try_advisory_lock<br/>(lockKey + i)?"}
-    D -->|"Acquired lock i"| E["Add i to ownedPartitions<br/>Update scheduler_lease row i"]
+    C --> D{"For i in 0..totalPartitions-1"}
+    D --> D1["sleep(random(0, lockAcquireDelayMs))<br/>// micro-delay jitter for fair distribution"]
+    D1 --> D2{"pg_try_advisory_lock<br/>(lockKey + i)?"}
+    D2 -->|"Acquired lock i"| E["Add i to ownedPartitions<br/>Update scheduler_lease row i"]
     E --> D
+    D2 -->|"Lock held by other"| D
     D -->|"All locks tried"| F{"ownedPartitions<br/>empty?"}
     F -->|"Yes"| G["standby mode"]
     F -->|"No"| H["leader = true<br/>owns partitions list"]
