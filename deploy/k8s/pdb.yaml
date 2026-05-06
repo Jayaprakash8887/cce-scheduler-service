@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cce-scheduler-pdb
+  namespace: cce
+  labels:
+    app.kubernetes.io/name: cce-scheduler-service
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cce-scheduler-service

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <springProperty scope="context" name="APP_NAME" source="spring.application.name" defaultValue="cce-scheduler-service"/>
+
+    <!-- Structured JSON console appender for production -->
+    <springProfile name="!local">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+                <pattern>{"timestamp":"%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX}","level":"%level","logger":"%logger{36}","thread":"%thread","message":"%msg","correlationId":"%X{correlationId:-}","stepInstanceId":"%X{stepInstanceId:-}","transitionType":"%X{transitionType:-}","leaderStatus":"%X{leaderStatus:-}","ownedPartitions":"%X{ownedPartitions:-}","currentPartition":"%X{currentPartition:-}","totalPartitions":"%X{totalPartitions:-}"}%n</pattern>
+            </encoder>
+        </appender>
+    </springProfile>
+
+    <!-- Human-readable console appender for local development -->
+    <springProfile name="local">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+                <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%X{correlationId:-}|p%X{currentPartition:-}] - %msg%n</pattern>
+            </encoder>
+        </appender>
+    </springProfile>
+
+    <!-- Root logger -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+    <!-- Application loggers -->
+    <logger name="org.openphc.cce.scheduler.engine" level="INFO"/>
+    <logger name="org.openphc.cce.scheduler.leader" level="INFO"/>
+    <logger name="org.openphc.cce.scheduler.kafka" level="INFO"/>
+    <logger name="org.openphc.cce.scheduler.health" level="INFO"/>
+
+    <!-- Framework loggers -->
+    <logger name="org.springframework" level="WARN"/>
+    <logger name="org.hibernate" level="WARN"/>
+    <logger name="org.apache.kafka" level="WARN"/>
+
+</configuration>

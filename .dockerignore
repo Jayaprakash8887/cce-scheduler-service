@@ -1,0 +1,31 @@
+# Build artifacts
+build/
+.gradle/
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+docs/
+artifacts/
+README.md
+*.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test sources (not needed in image)
+src/test/
+src/integrationTest/
+
+# CI/CD
+.github/
