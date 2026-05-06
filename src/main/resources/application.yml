@@ -1,0 +1,75 @@
+server:
+  port: ${SERVER_PORT:8083}
+
+spring:
+  application:
+    name: cce-scheduler-service
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/cce_collector}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 2
+      pool-name: scheduler-hikari
+      max-lifetime: 1800000
+      idle-timeout: 600000
+      connection-timeout: 5000
+      leak-detection-threshold: 15000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        default_schema: public
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 15000
+        linger.ms: 50
+
+cce:
+  scheduler:
+    scan-interval: ${SCHEDULER_SCAN_INTERVAL:5000}
+    batch-size: ${SCHEDULER_BATCH_SIZE:100}
+    lease-duration-seconds: ${SCHEDULER_LEASE_DURATION:30}
+    leader-retry-interval: ${SCHEDULER_LEADER_RETRY:5000}
+    advisory-lock-key: ${SCHEDULER_LOCK_KEY:100001}
+    total-partitions: ${SCHEDULER_TOTAL_PARTITIONS:1}
+    lock-acquire-delay-ms: ${SCHEDULER_LOCK_ACQUIRE_DELAY:50}
+  kafka:
+    topics:
+      scheduler-triggers: ${KAFKA_TOPIC_SCHEDULER_TRIGGERS:cce.scheduler.triggers}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
