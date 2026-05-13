@@ -181,3 +181,30 @@ FROM step_instance;
 | `cce.scheduler.transition-log.enabled` | `true` | Enable/disable transition logging |
 | `cce.scheduler.snapshot.enabled` | `true` | Enable/disable state snapshot refresh |
 | `cce.scheduler.snapshot.protocol-level` | `false` | Enable per-protocol breakdowns in snapshot |
+
+---
+
+## 5. Cross-Service Dependencies
+
+### 5.1 step_instance.protocol_definition_id (Compliance Service §2.8)
+
+The Compliance Service will add a `protocol_definition_id` column to `step_instance` (see **Compliance Service §2.8**). This benefits the Scheduler Service in two ways:
+
+1. **`transition_log` enrichment** — Currently, `transition_log` stores `protocol_instance_id` but not `protocol_definition_id`. Once the column exists on `step_instance`, the scheduler can denormalize it onto `transition_log` as well, enabling protocol-level transition analytics without JOINing through `protocol_instance`.
+
+2. **`step_state_snapshot` per-protocol breakdown** — The `step_state_snapshot` table supports optional `protocol_definition_id` grouping. With the column on `step_instance`, the scheduler can populate per-protocol snapshots efficiently:
+   ```sql
+   SELECT protocol_definition_id, state, COUNT(*)
+   FROM step_instance
+   GROUP BY protocol_definition_id, state
+   ```
+   Without the column, this query requires a JOIN to `protocol_instance`.
+
+**Schema change (after Compliance V18):**
+
+```sql
+ALTER TABLE transition_log ADD COLUMN protocol_definition_id UUID;
+CREATE INDEX idx_transition_log_protocol_def ON transition_log (protocol_definition_id);
+```
+
+**Code change:** In `SchedulerLoop.executeCycle()`, read `step.getProtocolDefinitionId()` (newly available) and set it on the `TransitionLog` entry.
