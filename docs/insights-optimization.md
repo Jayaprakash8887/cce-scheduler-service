@@ -2,7 +2,8 @@
 
 > **CCE Scheduler Service** — Pre-computed transition metrics for the Insights Service  
 > **Status**: Proposed | **Target**: v1.2.0  
-> **Last Updated**: 2026-05-11
+> **Last Updated**: 2026-05-14  
+> **Deployment Model**: Fresh deployment (no existing data to migrate)
 
 ---
 
@@ -33,6 +34,7 @@ CREATE TABLE transition_log (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     step_instance_id     UUID NOT NULL,
     protocol_instance_id UUID NOT NULL,
+    protocol_definition_id UUID,               -- denormalized from step_instance (see Compliance §2.8)
     action_id            VARCHAR(200) NOT NULL,
     from_state           VARCHAR(20) NOT NULL,  -- PENDING, DUE, OVERDUE
     to_state             VARCHAR(20) NOT NULL,   -- DUE, OVERDUE, MISSED, SKIPPED
@@ -45,6 +47,7 @@ CREATE INDEX idx_transition_log_step ON transition_log (step_instance_id);
 CREATE INDEX idx_transition_log_time ON transition_log (transitioned_at);
 CREATE INDEX idx_transition_log_type ON transition_log (transition_type);
 CREATE INDEX idx_transition_log_protocol ON transition_log (protocol_instance_id);
+CREATE INDEX idx_transition_log_protocol_def ON transition_log (protocol_definition_id);
 ```
 
 **Update trigger:** In `SchedulerLoop.executeCycle()`, after successfully publishing the Kafka trigger event for each step, also persist a `transition_log` entry in the same cycle.
@@ -130,33 +133,9 @@ DO UPDATE SET
 - **`transition_log`** — Persisted in the same database transaction as the Kafka publish success check. If the Kafka publish fails, no log entry is created (the transition didn't happen).
 - **`step_state_snapshot`** — Eventually consistent (refreshed every scan cycle). The `snapshot_at` timestamp indicates data freshness.
 
-### 3.1 Backfill Strategy
+### 3.1 No Backfill Required
 
-```sql
--- transition_log: cannot be fully backfilled (historical transitions were not recorded)
--- Partial backfill from step_instance timestamps:
-INSERT INTO transition_log (step_instance_id, protocol_instance_id, action_id, from_state, to_state, transition_type, transitioned_at, partition_index)
-SELECT
-    si.id, si.protocol_instance_id, si.action_id,
-    'DUE', 'OVERDUE', 'DUE_TO_OVERDUE',
-    si.updated_at, 0
-FROM step_instance si
-WHERE si.state IN ('OVERDUE', 'MISSED')
-  AND si.updated_at IS NOT NULL;
-
--- step_state_snapshot: full computation
-INSERT INTO step_state_snapshot (protocol_definition_id, facility_id, pending_count, due_count, overdue_count, missed_count, completed_count, skipped_count, total_count)
-SELECT
-    NULL, NULL,
-    COUNT(*) FILTER (WHERE state = 'PENDING'),
-    COUNT(*) FILTER (WHERE state = 'DUE'),
-    COUNT(*) FILTER (WHERE state = 'OVERDUE'),
-    COUNT(*) FILTER (WHERE state = 'MISSED'),
-    COUNT(*) FILTER (WHERE state = 'COMPLETED'),
-    COUNT(*) FILTER (WHERE state = 'SKIPPED'),
-    COUNT(*)
-FROM step_instance;
-```
+Since this is a fresh deployment with no existing data, all tables are created in the initial schema. `transition_log` populates organically as the scheduler triggers state transitions. `step_state_snapshot` is computed at the end of each scan cycle. No backfill migrations are needed.
 
 ---
 
@@ -167,12 +146,15 @@ FROM step_instance;
 | New `transition_log` table | Table | New | Scheduler | Each state transition |
 | New `step_state_snapshot` table | Table | New | Scheduler | End of each scan cycle |
 
-### 4.1 Flyway Migration Plan
+### 4.1 Flyway Migration Plan (Fresh Deployment)
+
+All optimizations are included in the initial schema:
 
 | Order | Migration | Description |
 |-------|-----------|-------------|
-| V2 | `V2__create_transition_log.sql` | Create table + indexes + partial backfill |
-| V3 | `V3__create_step_state_snapshot.sql` | Create table + initial snapshot |
+| V1 | `V1__initial_schema.sql` | Scheduler core tables (if any) |
+| V2 | `V2__create_transition_log.sql` | Transition log with `protocol_definition_id` from day 1 |
+| V3 | `V3__create_step_state_snapshot.sql` | Step state snapshot table |
 
 ### 4.2 Configuration Additions
 
@@ -188,23 +170,9 @@ FROM step_instance;
 
 ### 5.1 step_instance.protocol_definition_id (Compliance Service §2.8)
 
-The Compliance Service will add a `protocol_definition_id` column to `step_instance` (see **Compliance Service §2.8**). This benefits the Scheduler Service in two ways:
+The Compliance Service includes `protocol_definition_id` on `step_instance` from the initial schema (see **Compliance Service §2.8**). Since all services are deployed fresh, `transition_log` also includes `protocol_definition_id` from day 1 (no separate migration needed). This enables:
 
-1. **`transition_log` enrichment** — Currently, `transition_log` stores `protocol_instance_id` but not `protocol_definition_id`. Once the column exists on `step_instance`, the scheduler can denormalize it onto `transition_log` as well, enabling protocol-level transition analytics without JOINing through `protocol_instance`.
+1. **Protocol-level transition analytics** — `transition_log.protocol_definition_id` allows filtering/grouping without JOINing through `protocol_instance`
+2. **Per-protocol `step_state_snapshot` breakdowns** — efficient `GROUP BY protocol_definition_id` directly on `step_instance`
 
-2. **`step_state_snapshot` per-protocol breakdown** — The `step_state_snapshot` table supports optional `protocol_definition_id` grouping. With the column on `step_instance`, the scheduler can populate per-protocol snapshots efficiently:
-   ```sql
-   SELECT protocol_definition_id, state, COUNT(*)
-   FROM step_instance
-   GROUP BY protocol_definition_id, state
-   ```
-   Without the column, this query requires a JOIN to `protocol_instance`.
-
-**Schema change (after Compliance V18):**
-
-```sql
-ALTER TABLE transition_log ADD COLUMN protocol_definition_id UUID;
-CREATE INDEX idx_transition_log_protocol_def ON transition_log (protocol_definition_id);
-```
-
-**Code change:** In `SchedulerLoop.executeCycle()`, read `step.getProtocolDefinitionId()` (newly available) and set it on the `TransitionLog` entry.
+**Code change:** In `SchedulerLoop.executeCycle()`, read `step.getProtocolDefinitionId()` and set it on the `TransitionLog` entry.
