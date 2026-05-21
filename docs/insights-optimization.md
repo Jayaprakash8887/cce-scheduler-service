@@ -2,7 +2,7 @@
 
 > **CCE Scheduler Service** — Pre-computed transition metrics for the Insights Service  
 > **Status**: Proposed | **Target**: v1.2.0  
-> **Last Updated**: 2026-05-14  
+> **Last Updated**: 2025-05-28  
 > **Deployment Model**: Fresh deployment (no existing data to migrate)
 
 ---
@@ -17,6 +17,12 @@ Currently, the Scheduler Service has **no persistent record** of transitions it 
 2. **Step state distribution** requires `GROUP BY state` on the full `step_instance` table (potentially hundreds of thousands of rows)
 3. **Trend analysis** (e.g., overdue rate over time) is impossible without a transition log
 
+### 1.1 Design Constraint: No Core Table Denormalization
+
+> **Customer directive:** Core operational tables must NOT be modified for insights purposes. Instead, all insights data is served from **separate pre-computed tables** that are updated incrementally in real-time by service code.
+>
+> These pre-computed tables are **temporary** — they will be replaced by a dedicated data pipeline in a future release. Both tables defined here (`transition_log`, `step_state_snapshot`) are self-contained and droppable without affecting core scheduler functionality.
+
 ---
 
 ## 2. Optimizations Owned by Scheduler Service
@@ -25,7 +31,7 @@ Currently, the Scheduler Service has **no persistent record** of transitions it 
 
 **Problem:** The Insights Service cannot query "when did each step transition to its current state?" without scanning the full table and inferring from timestamps. Deviation trends by date require joining `deviation` with `step_instance` and grouping by `detected_at`.
 
-**Solution:** The Scheduler Service persists a log entry for each state transition it triggers, creating a queryable audit trail.
+**Solution:** The Scheduler Service persists a log entry for each state transition it triggers, creating a queryable audit trail. The `protocol_definition_id` is resolved at write time by JOINing `step_instance → protocol_instance`, avoiding the need to add it to `step_instance` directly.
 
 **Schema:**
 
@@ -34,7 +40,7 @@ CREATE TABLE transition_log (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     step_instance_id     UUID NOT NULL,
     protocol_instance_id UUID NOT NULL,
-    protocol_definition_id UUID,               -- denormalized from step_instance (see Compliance §2.8)
+    protocol_definition_id UUID,               -- resolved via step_instance → protocol_instance at write time
     action_id            VARCHAR(200) NOT NULL,
     from_state           VARCHAR(20) NOT NULL,  -- PENDING, DUE, OVERDUE
     to_state             VARCHAR(20) NOT NULL,   -- DUE, OVERDUE, MISSED, SKIPPED
@@ -50,7 +56,7 @@ CREATE INDEX idx_transition_log_protocol ON transition_log (protocol_instance_id
 CREATE INDEX idx_transition_log_protocol_def ON transition_log (protocol_definition_id);
 ```
 
-**Update trigger:** In `SchedulerLoop.executeCycle()`, after successfully publishing the Kafka trigger event for each step, also persist a `transition_log` entry in the same cycle.
+**Update trigger:** In `SchedulerLoop.executeCycle()`, after successfully publishing the Kafka trigger event for each step, also persist a `transition_log` entry in the same cycle. The `protocol_definition_id` is read from the associated `protocol_instance` (resolved via `step_instance.protocol_instance_id`).
 
 **Insights Service query enablement:**
 
@@ -88,7 +94,7 @@ CREATE TABLE step_state_snapshot (
 );
 ```
 
-**Update trigger:** At the end of each `SchedulerLoop.executeCycle()` (after all transitions for the current partition), recalculate the global state counts:
+**Update trigger:** At the end of each `SchedulerLoop.executeCycle()` (after all transitions for the current partition), recalculate the global state counts. The `protocol_definition_id` is resolved via `step_instance → protocol_instance` JOIN:
 
 ```sql
 INSERT INTO step_state_snapshot (protocol_definition_id, facility_id, pending_count, due_count, overdue_count, missed_count, completed_count, skipped_count, total_count, snapshot_at)
@@ -146,6 +152,8 @@ Since this is a fresh deployment with no existing data, all tables are created i
 | New `transition_log` table | Table | New | Scheduler | Each state transition |
 | New `step_state_snapshot` table | Table | New | Scheduler | End of each scan cycle |
 
+> **Note:** No columns are added to the `step_instance` table. The `step_instance` schema remains unchanged. The `protocol_definition_id` needed by `transition_log` and `step_state_snapshot` is resolved via JOIN at write time.
+
 ### 4.1 Flyway Migration Plan (Fresh Deployment)
 
 All optimizations are included in the initial schema:
@@ -153,7 +161,7 @@ All optimizations are included in the initial schema:
 | Order | Migration | Description |
 |-------|-----------|-------------|
 | V1 | `V1__initial_schema.sql` | Scheduler core tables (if any) |
-| V2 | `V2__create_transition_log.sql` | Transition log with `protocol_definition_id` from day 1 |
+| V2 | `V2__create_transition_log.sql` | Transition log table |
 | V3 | `V3__create_step_state_snapshot.sql` | Step state snapshot table |
 
 ### 4.2 Configuration Additions
@@ -166,13 +174,11 @@ All optimizations are included in the initial schema:
 
 ---
 
-## 5. Cross-Service Dependencies
+## 5. Future: Data Pipeline Replacement
 
-### 5.1 step_instance.protocol_definition_id (Compliance Service §2.8)
+All pre-computed tables defined in this document are **temporary**. They will be replaced by a dedicated data pipeline in a future release. When the data pipeline is implemented:
 
-The Compliance Service includes `protocol_definition_id` on `step_instance` from the initial schema (see **Compliance Service §2.8**). Since all services are deployed fresh, `transition_log` also includes `protocol_definition_id` from day 1 (no separate migration needed). This enables:
-
-1. **Protocol-level transition analytics** — `transition_log.protocol_definition_id` allows filtering/grouping without JOINing through `protocol_instance`
-2. **Per-protocol `step_state_snapshot` breakdowns** — efficient `GROUP BY protocol_definition_id` directly on `step_instance`
-
-**Code change:** In `SchedulerLoop.executeCycle()`, read `step.getProtocolDefinitionId()` and set it on the `TransitionLog` entry.
+1. Drop the pre-computed tables (`transition_log`, `step_state_snapshot`)
+2. Remove the corresponding repository, entity, and service code
+3. Core `step_instance` table remains completely unchanged — no rollback needed
+4. The Insights Service switches from querying pre-computed tables to querying the data warehouse
