@@ -2,7 +2,7 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: cce_collector
+      POSTGRES_DB: ccedb
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
@@ -10,7 +10,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d cce_collector"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ccedb"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -41,7 +41,7 @@ services:
     build: .
     environment:
       SERVER_PORT: 8083
-      DB_URL: jdbc:postgresql://postgres:5432/cce_collector
+      DB_URL: jdbc:postgresql://postgres:5432/ccedb
       DB_USERNAME: postgres
       DB_PASSWORD: postgres
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092

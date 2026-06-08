@@ -31,7 +31,7 @@ class DueStepScannerIntegrationTest {
 
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")
-            .withDatabaseName("cce_collector")
+            .withDatabaseName("ccedb")
             .withUsername("test")
             .withPassword("test")
             .withInitScript("init-step-instance.sql");

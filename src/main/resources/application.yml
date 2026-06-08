@@ -6,7 +6,7 @@ spring:
     name: cce-scheduler-service
 
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5432/cce_collector}
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/ccedb}
     username: ${DB_USERNAME:postgres}
     password: ${DB_PASSWORD:postgres}
     hikari:
