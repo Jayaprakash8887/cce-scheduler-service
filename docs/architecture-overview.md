@@ -267,7 +267,7 @@ Instance A → acquires locks 100001, 100002, 100003 → owns [partition 0, 1, 2
 
 ### 4.3 Shared Database Access
 
-The Scheduler connects to the **same PostgreSQL database** (`cce_collector`) as all other CCE services. The database is deployed by the CCE Collector Service.
+The Scheduler connects to the **same PostgreSQL database** (`ccedb`) as all other CCE services. The database is deployed by the CCE Collector Service.
 
 | Table | Owner | Scheduler Access | Purpose |
 |---|---|---|---|

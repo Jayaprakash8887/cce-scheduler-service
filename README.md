@@ -33,7 +33,7 @@ The Scheduler detects when clinical protocol steps become **DUE**, **OVERDUE**, 
 | Language | Java 21 (LTS) |
 | Framework | Spring Boot 3.4.x |
 | Build | Gradle 8.x |
-| Database | PostgreSQL 16+ (shared `cce_collector` DB) |
+| Database | PostgreSQL 16+ (shared `ccedb` DB) |
 | Messaging | Apache Kafka 3.7+ (KRaft mode) |
 | DB Access | Spring Data JPA + Hibernate |
 | Migrations | Flyway |
@@ -70,7 +70,7 @@ cd /path/to/cce-scheduler-service
 curl localhost:8083/actuator/health
 ```
 
-> The Scheduler connects to the same `cce_collector` database as all other CCE services. The `step_instance` table must exist (created by Compliance Service migrations) before the Scheduler can scan.
+> The Scheduler connects to the same `ccedb` database as all other CCE services. The `step_instance` table must exist (created by Compliance Service migrations) before the Scheduler can scan.
 
 ---
 
@@ -83,7 +83,7 @@ Key environment variables (all have sensible defaults for local development):
 | `SERVER_PORT` | `8083` | HTTP port (actuator only) |
 | `DB_HOST` | `localhost` | PostgreSQL host |
 | `DB_PORT` | `5433` | PostgreSQL port |
-| `DB_NAME` | `cce_collector` | Shared database name |
+| `DB_NAME` | `ccedb` | Shared database name |
 | `DB_USERNAME` | `cce_user` | Database username |
 | `DB_PASSWORD` | `cce_pass` | Database password |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka bootstrap servers |

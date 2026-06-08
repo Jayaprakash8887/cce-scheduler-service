@@ -5,7 +5,7 @@
 | Component    | Version  | Notes                                    |
 |------------- |----------|------------------------------------------|
 | Java         | 21 LTS   | Eclipse Temurin recommended              |
-| PostgreSQL   | 16+      | Shared `cce_collector` database          |
+| PostgreSQL   | 16+      | Shared `ccedb` database          |
 | Apache Kafka | 3.6+     | Topic auto-create or pre-provisioned     |
 | Docker       | 24+      | For container deployments                |
 | Kubernetes   | 1.28+    | For orchestrated deployments (optional)  |
@@ -21,7 +21,7 @@ All configuration is via environment variables. Defaults are suitable for local 
 | Variable                        | Default                                         | Description                              |
 |---------------------------------|-------------------------------------------------|------------------------------------------|
 | `SERVER_PORT`                   | `8083`                                          | HTTP port (actuator only)                |
-| `DB_URL`                        | `jdbc:postgresql://localhost:5432/cce_collector` | PostgreSQL JDBC URL                      |
+| `DB_URL`                        | `jdbc:postgresql://localhost:5432/ccedb` | PostgreSQL JDBC URL                      |
 | `DB_USERNAME`                   | `postgres`                                      | Database username                        |
 | `DB_PASSWORD`                   | `postgres`                                      | Database password                        |
 | `KAFKA_BOOTSTRAP_SERVERS`       | `localhost:9092`                                | Kafka broker addresses                   |
@@ -43,10 +43,10 @@ All configuration is via environment variables. Defaults are suitable for local 
 
 ## 2. Database Setup
 
-The service uses Flyway for automatic schema migration. On first startup it will create the `scheduler_lease` table in the shared `cce_collector` database.
+The service uses Flyway for automatic schema migration. On first startup it will create the `scheduler_lease` table in the shared `ccedb` database.
 
 **Pre-requisites:**
-- The `cce_collector` database must exist
+- The `ccedb` database must exist
 - The `step_instance` table (managed by Compliance Service) must exist
 - The service user needs `SELECT` on `step_instance` and full access to `scheduler_lease`
 
@@ -93,7 +93,7 @@ This starts PostgreSQL, Kafka (KRaft mode), and the scheduler service. The servi
 
 # Run
 java -jar build/libs/cce-scheduler-service-1.0.0-SNAPSHOT.jar \
-  --spring.datasource.url=jdbc:postgresql://localhost:5432/cce_collector
+  --spring.datasource.url=jdbc:postgresql://localhost:5432/ccedb
 ```
 
 ---
@@ -111,7 +111,7 @@ docker build -t openphc/cce-scheduler-service:1.0.0 .
 ```bash
 docker run -d \
   --name cce-scheduler \
-  -e DB_URL=jdbc:postgresql://db-host:5432/cce_collector \
+  -e DB_URL=jdbc:postgresql://db-host:5432/ccedb \
   -e DB_USERNAME=scheduler_user \
   -e DB_PASSWORD=<secret> \
   -e KAFKA_BOOTSTRAP_SERVERS=kafka-host:9092 \
@@ -140,7 +140,7 @@ Apply manifests from the `deploy/k8s/` directory:
 kubectl apply -f deploy/k8s/namespace.yaml
 kubectl create secret generic scheduler-db-credentials \
   --namespace cce \
-  --from-literal=DB_URL=jdbc:postgresql://pg-host:5432/cce_collector \
+  --from-literal=DB_URL=jdbc:postgresql://pg-host:5432/ccedb \
   --from-literal=DB_USERNAME=scheduler_user \
   --from-literal=DB_PASSWORD=<secret>
 kubectl apply -f deploy/k8s/

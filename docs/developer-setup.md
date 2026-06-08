@@ -30,7 +30,7 @@ cd cce-scheduler-service
 
 ### 2.2 Start Infrastructure
 
-PostgreSQL, Kafka, and the shared database (`cce_collector`) are deployed by the **CCE Collector Service**. All CCE services share the same database.
+PostgreSQL, Kafka, and the shared database (`ccedb`) are deployed by the **CCE Collector Service**. All CCE services share the same database.
 
 ```bash
 # Start shared infrastructure (PostgreSQL on port 5433 + Kafka on port 9092)
@@ -43,7 +43,7 @@ docker compose ps
 
 ### 2.3 Shared Database Requirement
 
-The Scheduler Service connects to the **same PostgreSQL database** (`cce_collector`) as all other CCE services. The database and infrastructure are deployed by the **CCE Collector Service**. The `step_instance` table must exist before the Scheduler can function.
+The Scheduler Service connects to the **same PostgreSQL database** (`ccedb`) as all other CCE services. The database and infrastructure are deployed by the **CCE Collector Service**. The `step_instance` table must exist before the Scheduler can function.
 
 **Development options:**
 1. **Run Compliance Service first** — its Flyway migrations create all tables including `step_instance`
@@ -80,7 +80,7 @@ spring:
   application:
     name: cce-scheduler-service
   datasource:
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME:cce_collector}
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME:ccedb}
     username: ${DB_USERNAME:cce_user}
     password: ${DB_PASSWORD:cce_pass}
     hikari:
@@ -142,7 +142,7 @@ management:
 | `SERVER_PORT` | `8083` | HTTP port (actuator only) |
 | `DB_HOST` | `localhost` | PostgreSQL host |
 | `DB_PORT` | `5433` | PostgreSQL port (shared with Collector Service) |
-| `DB_NAME` | `cce_collector` | Shared database name (all CCE services) |
+| `DB_NAME` | `ccedb` | Shared database name (all CCE services) |
 | `DB_USERNAME` | `cce_user` | Database username (shared with Collector Service) |
 | `DB_PASSWORD` | `cce_pass` | Database password (shared with Collector Service) |
 | `DB_POOL_SIZE` | `5` | HikariCP max pool size |
@@ -243,7 +243,7 @@ docker build -t cce-scheduler-service .
 docker run -p 8083:8083 \
   -e DB_HOST=host.docker.internal \
   -e DB_PORT=5433 \
-  -e DB_NAME=cce_collector \
+  -e DB_NAME=ccedb \
   -e DB_USERNAME=cce_user \
   -e DB_PASSWORD=cce_pass \
   -e KAFKA_BOOTSTRAP_SERVERS=host.docker.internal:9092 \

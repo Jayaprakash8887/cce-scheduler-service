@@ -94,7 +94,7 @@ docker build -t openphc/cce-scheduler-service:1.0.0 .
 
 - No REST API — communication is exclusively via Kafka and database polling
 - Partition rebalancing is greedy (not cooperative) — works best when replicas ≤ partitions
-- Requires shared `cce_collector` database with Compliance Service
+- Requires shared `ccedb` database with Compliance Service
 - Advisory locks are session-scoped — connection loss triggers leadership loss
 
 ---
