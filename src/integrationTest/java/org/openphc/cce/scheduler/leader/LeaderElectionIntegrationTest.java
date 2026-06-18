@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.openphc.cce.scheduler.config.SchedulerProperties;
 import org.openphc.cce.scheduler.domain.model.SchedulerLease;
 import org.openphc.cce.scheduler.domain.repository.SchedulerLeaseRepository;
+import org.openphc.cce.scheduler.domain.repository.SchedulerNodeRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -51,6 +52,9 @@ class LeaderElectionIntegrationTest {
     private SchedulerLeaseRepository leaseRepository;
 
     @Autowired
+    private SchedulerNodeRepository nodeRepository;
+
+    @Autowired
     private DataSource dataSource;
 
     private SchedulerProperties properties;
@@ -66,6 +70,7 @@ class LeaderElectionIntegrationTest {
     @AfterEach
     void cleanUp() {
         leaseRepository.deleteAll();
+        nodeRepository.deleteAll();
     }
 
     @Test
@@ -109,7 +114,7 @@ class LeaderElectionIntegrationTest {
     }
 
     @Test
-    void multiPartition_twoInstances_distributePartitions() throws InterruptedException {
+    void multiPartition_twoInstances_rebalanceToFairShare() {
         properties.setTotalPartitions(4);
 
         SchedulerProperties props2 = new SchedulerProperties();
@@ -122,16 +127,27 @@ class LeaderElectionIntegrationTest {
         LeaderElection election2 = createElection(props2);
 
         try {
-            // First instance grabs all
+            // Round 1: instance 1 boots alone and (correctly) grabs everything.
             election1.tryAcquirePartitions();
             assertThat(election1.getOwnedPartitions()).hasSize(4);
 
-            // Second instance gets none (all locked by first)
+            // Instance 2 joins: it registers as a live node but every lock is still held.
             election2.tryAcquirePartitions();
             assertThat(election2.getOwnedPartitions()).isEmpty();
 
-            // Total coverage: all 4 partitions owned by instance 1
-            assertThat(election1.getOwnedPartitions()).containsExactly(0, 1, 2, 3);
+            // Round 2: instance 1 now sees 2 live nodes, fair share = 2, and sheds the surplus.
+            election1.tryAcquirePartitions();
+            assertThat(election1.getOwnedPartitions()).hasSize(2);
+
+            // Instance 2 picks up the two freed partitions.
+            election2.tryAcquirePartitions();
+            assertThat(election2.getOwnedPartitions()).hasSize(2);
+
+            // Together they cover all 4 with no overlap — real distribution, not all-or-nothing.
+            assertThat(election1.getOwnedPartitions())
+                    .doesNotContainAnyElementsOf(election2.getOwnedPartitions());
+            assertThat(election1.getOwnedPartitions().size()
+                    + election2.getOwnedPartitions().size()).isEqualTo(4);
         } finally {
             election1.shutdown();
             election2.shutdown();
@@ -225,6 +241,7 @@ class LeaderElectionIntegrationTest {
         return new LeaderElection(
                 props,
                 leaseRepository,
+                nodeRepository,
                 dataSource,
                 new SimpleMeterRegistry());
     }
