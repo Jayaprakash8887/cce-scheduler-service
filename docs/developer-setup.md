@@ -50,7 +50,7 @@ The Scheduler Service connects to the **same PostgreSQL database** (`ccedb`) as 
 2. **Use init script** — apply the Compliance Service schema manually before starting the Scheduler
 3. **Testcontainers** — integration tests include init scripts that create both schemas
 
-The Scheduler's own Flyway migration (`V1__create_scheduler_lease.sql`) creates only the `scheduler_lease` table.
+The Scheduler's own Flyway migrations create only its own tables: `V1__create_scheduler_lease.sql` (`scheduler_lease`) and `V2__create_scheduler_node.sql` (`scheduler_node`, the live-instance registry used for fair-share partition sizing).
 
 ### 2.4 Run the Application
 
@@ -150,10 +150,11 @@ management:
 | `KAFKA_TOPIC_SCHEDULER_TRIGGERS` | `cce.scheduler.triggers` | Output Kafka topic |
 | `SCHEDULER_SCAN_INTERVAL` | `5000` | Scan interval in milliseconds |
 | `SCHEDULER_BATCH_SIZE` | `100` | Max steps per scan cycle |
-| `SCHEDULER_LEASE_DURATION` | `30` | Lease expiry in seconds |
-| `SCHEDULER_LEADER_RETRY` | `5000` | Leader retry interval in milliseconds |
+| `SCHEDULER_LEASE_DURATION` | `30` | Lease expiry in seconds; also the staleness window for pruning `scheduler_node` rows |
+| `SCHEDULER_LEADER_RETRY` | `5000` | Leader retry interval in milliseconds; also how often fair share is recomputed |
 | `SCHEDULER_LOCK_KEY` | `100001` | Base PostgreSQL advisory lock key. Partitions use keys `LOCK_KEY + 0` through `LOCK_KEY + TOTAL_PARTITIONS - 1`. |
-| `SCHEDULER_TOTAL_PARTITIONS` | `1` | Number of scan partitions for horizontal scaling. `1` = single-leader (default). |
+| `SCHEDULER_TOTAL_PARTITIONS` | `1` | Number of scan partitions for horizontal scaling. `1` = single-leader (default). Each instance owns at most its fair share, `ceil(TOTAL_PARTITIONS / live-instances)`. |
+| `SCHEDULER_LOCK_ACQUIRE_DELAY` | `50` | Max jitter (ms) between lock attempts to stagger simultaneous starts; even distribution is enforced by the fair-share cap, not this. `0` disables. |
 
 ## 4. Project Structure
 

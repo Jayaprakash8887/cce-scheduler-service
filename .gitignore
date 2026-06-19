@@ -60,3 +60,5 @@ replay_pid*
 .github/
 
 target/
+
+.claude/

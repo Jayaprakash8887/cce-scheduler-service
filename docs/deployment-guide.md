@@ -37,23 +37,24 @@ All configuration is via environment variables. Defaults are suitable for local 
 | `SCHEDULER_LEADER_RETRY`        | `5000`    | Retry interval for leader acquisition (ms)           |
 | `SCHEDULER_LOCK_KEY`            | `100001`  | Base pg_advisory_lock key                            |
 | `SCHEDULER_TOTAL_PARTITIONS`    | `1`       | Number of partitions for multi-leader mode           |
-| `SCHEDULER_LOCK_ACQUIRE_DELAY`  | `50`      | Delay between partition lock attempts (ms)           |
+| `SCHEDULER_LOCK_ACQUIRE_DELAY`  | `50`      | Jitter between lock attempts (ms); even split is enforced by the fair-share cap, not this |
 
 ---
 
 ## 2. Database Setup
 
-The service uses Flyway for automatic schema migration. On first startup it will create the `scheduler_lease` table in the shared `ccedb` database.
+The service uses Flyway for automatic schema migration. On first startup it will create the `scheduler_lease` and `scheduler_node` tables in the shared `ccedb` database.
 
 **Pre-requisites:**
 - The `ccedb` database must exist
 - The `step_instance` table (managed by Compliance Service) must exist
-- The service user needs `SELECT` on `step_instance` and full access to `scheduler_lease`
+- The service user needs `SELECT` on `step_instance` and full access to `scheduler_lease` and `scheduler_node`
 
 ```sql
 -- Minimal grants (if not using superuser)
 GRANT SELECT ON step_instance TO scheduler_user;
 GRANT ALL ON scheduler_lease TO scheduler_user;
+GRANT ALL ON scheduler_node TO scheduler_user;
 GRANT USAGE ON SCHEMA public TO scheduler_user;
 ```
 
@@ -148,9 +149,9 @@ kubectl apply -f deploy/k8s/
 
 ### Scaling
 
-- **Horizontal scaling**: Deploy N replicas. Each replica competes for partition locks using `pg_advisory_lock`. Set `SCHEDULER_TOTAL_PARTITIONS` ≥ replica count.
-- **Recommended**: `replicas = SCHEDULER_TOTAL_PARTITIONS` for optimal distribution.
-- Partitions are greedy-acquired — no rebalance protocol needed.
+- **Horizontal scaling**: Deploy N replicas. Each replica competes for partition locks using `pg_advisory_lock`, bounded to its fair share (`ceil(SCHEDULER_TOTAL_PARTITIONS / live-replicas)`). Set `SCHEDULER_TOTAL_PARTITIONS` ≥ replica count to give every replica work.
+- **Recommended**: `replicas = SCHEDULER_TOTAL_PARTITIONS` for one partition per replica.
+- **Self-rebalancing**: when a replica is added, over-provisioned replicas shed their surplus partitions within a few `SCHEDULER_LEADER_RETRY` cycles (≈5–10s) — no rolling restart needed. This requires the `scheduler_node` registry; all replicas must share the same database.
 
 ### Resource Recommendations
 
