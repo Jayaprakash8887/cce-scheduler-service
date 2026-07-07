@@ -18,6 +18,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -43,6 +44,9 @@ public class LeaderElection {
     private volatile Connection dedicatedConnection;
     private volatile LeaderState state = new LeaderState(Collections.emptyList(), null, null);
     private final ReentrantLock connectionLock = new ReentrantLock();
+
+    /** When this instance booted — start of the optional startup acquisition grace period. */
+    private final OffsetDateTime bootTime = OffsetDateTime.now(ZoneOffset.UTC);
 
     /** Partitions whose advisory lock this pod currently holds. Guarded by {@link #connectionLock}. */
     private final Set<Integer> heldPartitions = new TreeSet<>();
@@ -89,20 +93,27 @@ public class LeaderElection {
             int activeNodes = countActiveNodes(now);
             int fairShare = fairShare(totalPartitions, activeNodes);
 
-            // Shed any surplus we grabbed while alone so newly-joined pods can take it.
-            releaseDownTo(fairShare);
+            if (inStartupGrace(now)) {
+                // Heartbeat registered above so peers count us; defer acquisition so
+                // co-starting instances register before anyone grabs a share.
+                log.info("Startup grace active — deferring partition acquisition for {}ms so peers can register",
+                        properties.getStartupAcquireDelayMs());
+            } else {
+                // Shed any surplus we grabbed while alone so newly-joined pods can take it.
+                releaseDownTo(fairShare);
 
-            // Acquire free partitions, but never beyond our fair share.
-            for (int i = 0; i < totalPartitions && heldPartitions.size() < fairShare; i++) {
-                if (heldPartitions.contains(i)) {
-                    continue;
-                }
-                if (tryAcquireLock(i)) {
-                    heldPartitions.add(i);
-                }
-                // Micro-delay between consecutive lock attempts for fair distribution
-                if (i < totalPartitions - 1 && properties.getLockAcquireDelayMs() > 0) {
-                    sleepJitter(properties.getLockAcquireDelayMs());
+                // Acquire free partitions, but never beyond our fair share.
+                for (int i = 0; i < totalPartitions && heldPartitions.size() < fairShare; i++) {
+                    if (heldPartitions.contains(i)) {
+                        continue;
+                    }
+                    if (tryAcquireLock(i)) {
+                        heldPartitions.add(i);
+                    }
+                    // Micro-delay between consecutive lock attempts for fair distribution
+                    if (i < totalPartitions - 1 && properties.getLockAcquireDelayMs() > 0) {
+                        sleepJitter(properties.getLockAcquireDelayMs());
+                    }
                 }
             }
 
@@ -152,6 +163,20 @@ public class LeaderElection {
             return totalPartitions;
         }
         return (int) Math.ceil((double) totalPartitions / activeNodes);
+    }
+
+    /**
+     * Whether this instance is still in its startup acquisition grace period — a window
+     * after boot during which it heartbeats but defers acquiring locks, letting peers
+     * register first so the initial ownership spreads by fair share. Only meaningful when
+     * there is more than one partition to distribute; disabled when the delay is 0.
+     */
+    private boolean inStartupGrace(OffsetDateTime now) {
+        long delayMs = properties.getStartupAcquireDelayMs();
+        if (delayMs <= 0 || properties.getTotalPartitions() <= 1) {
+            return false;
+        }
+        return now.isBefore(bootTime.plus(Duration.ofMillis(delayMs)));
     }
 
     private boolean tryAcquireLock(int partitionIndex) throws SQLException {

@@ -22,6 +22,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -168,6 +170,58 @@ class LeaderElectionTest {
     void fairShare_treatsZeroNodesAsSolo() {
         // Defensive: a count below 1 cannot starve the only live pod.
         assertThat(LeaderElection.fairShare(3, 0)).isEqualTo(3);
+    }
+
+    @Test
+    void tryAcquirePartitions_duringStartupGrace_defersAcquisitionButHeartbeats() throws SQLException {
+        properties.setTotalPartitions(3);
+        // 60s window — still in grace immediately after construction.
+        properties.setStartupAcquireDelayMs(60_000);
+
+        when(dataSource.getConnection()).thenReturn(connection);
+        when(nodeRepository.findById(anyString())).thenReturn(Optional.empty());
+        when(nodeRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(nodeRepository.countByLastHeartbeatAfter(any())).thenReturn(1L);
+
+        LeaderElection election = new LeaderElection(
+                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
+
+        election.tryAcquirePartitions();
+
+        // Acquisition deferred while in grace...
+        assertThat(election.getOwnedPartitions()).isEmpty();
+        assertThat(election.isLeader()).isFalse();
+        // ...but the node registered its heartbeat so peers count it toward fair share...
+        verify(nodeRepository).save(any());
+        // ...and no advisory lock was attempted.
+        verify(connection, never()).prepareStatement(anyString());
+    }
+
+    @Test
+    void tryAcquirePartitions_startupGraceIgnoredForSinglePartition() throws SQLException {
+        properties.setTotalPartitions(1);
+        properties.setStartupAcquireDelayMs(60_000); // ignored when there is nothing to distribute
+
+        PreparedStatement stmt = mock(PreparedStatement.class);
+        ResultSet rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(connection);
+        when(connection.prepareStatement(anyString())).thenReturn(stmt);
+        when(stmt.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getBoolean(1)).thenReturn(true);
+        when(leaseRepository.findByPartitionIndex(anyInt())).thenReturn(Optional.empty());
+        when(leaseRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(nodeRepository.findById(anyString())).thenReturn(Optional.empty());
+        when(nodeRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(nodeRepository.countByLastHeartbeatAfter(any())).thenReturn(1L);
+
+        LeaderElection election = new LeaderElection(
+                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
+
+        election.tryAcquirePartitions();
+
+        // Single partition: grace is skipped, the sole partition is owned immediately.
+        assertThat(election.getOwnedPartitions()).containsExactly(0);
     }
 
     @Test

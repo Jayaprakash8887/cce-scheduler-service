@@ -57,6 +57,7 @@ cce:
     total-partitions: ${SCHEDULER_TOTAL_PARTITIONS:1}
     lock-acquire-delay-ms: ${SCHEDULER_LOCK_ACQUIRE_DELAY:50}
     watermark-enabled: ${SCHEDULER_WATERMARK_ENABLED:true}
+    startup-acquire-delay-ms: ${SCHEDULER_STARTUP_ACQUIRE_DELAY:0}
   kafka:
     topics:
       scheduler-triggers: ${KAFKA_TOPIC_SCHEDULER_TRIGGERS:cce.scheduler.triggers}

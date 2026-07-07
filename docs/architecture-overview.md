@@ -220,6 +220,10 @@ Startup / each cycle (every leaderRetryInterval, default 5s):
 2. Upsert this node's heartbeat into scheduler_node (even as a standby)
 3. activeNodes = count of scheduler_node rows with a fresh heartbeat; prune stale rows
 4. fairShare = ceil(totalPartitions / activeNodes)
+4b. If still within the startup acquisition grace period (startupAcquireDelayMs, and
+    totalPartitions > 1) → skip steps 5–6 this cycle: heartbeat only, acquire nothing.
+    This lets co-starting instances register (step 2) before anyone grabs a share, so the
+    first ownership is already spread by fair share instead of the first booter taking all.
 5. If currently holding more than fairShare → pg_advisory_unlock the surplus
    (highest-indexed first) so newer instances can take it
 6. While holding fewer than fairShare → pg_try_advisory_lock free partitions
@@ -264,6 +268,8 @@ Convergence takes a few `leaderRetryInterval` cycles (≈5–10s), no restart re
 Without it, the instance that boots first wins every lock before the others finish starting (pod-start skew is far larger than any lock-acquisition delay), leaving the rest as idle standbys — HA, but **no throughput distribution**. Bounding each instance to `ceil(totalPartitions / activeNodes)` and shedding the surplus guarantees the work actually spreads across instances while still keeping every partition owned at all times.
 
 A small **randomized micro-delay** (`0–50ms`, `cce.scheduler.lock-acquire-delay-ms`) is still applied between consecutive lock attempts to stagger truly simultaneous starts; it is a minor smoothing aid, not the primary fairness mechanism (the fair-share cap is).
+
+**Optional startup grace period.** On a fresh deploy the first instance to boot still momentarily owns *all* partitions until its peers register and it sheds the surplus (converges in ≈1 retry cycle). To avoid even that transient, set `cce.scheduler.startup-acquire-delay-ms` (e.g. `30000`): for that window after boot each instance **heartbeats but defers acquisition**, so co-starting peers register first and the initial ownership lands on fair share directly. It is **off by default (`0`)** and **ignored when `total-partitions = 1`** (nothing to distribute). Trade-off: during a simultaneous cold start of *all* instances, no partition is scanned until the window elapses (a one-time startup delay); it does not affect rolling deploys, where a live instance keeps owning its partitions while new pods wait out their grace. The self-rebalance already prevents orphans and converges without it — this only smooths the initial spread.
 
 **Example with 3 partitions, 1 instance (safe — no orphans):**
 ```

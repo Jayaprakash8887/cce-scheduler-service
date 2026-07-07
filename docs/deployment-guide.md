@@ -39,6 +39,7 @@ All configuration is via environment variables. Defaults are suitable for local 
 | `SCHEDULER_TOTAL_PARTITIONS`    | `1`       | Number of partitions for multi-leader mode           |
 | `SCHEDULER_LOCK_ACQUIRE_DELAY`  | `50`      | Jitter between lock attempts (ms); even split is enforced by the fair-share cap, not this |
 | `SCHEDULER_WATERMARK_ENABLED`   | `true`    | Bound each scan below by the per-partition watermark so already-emitted crossings aren't re-published every cycle. `false` = legacy scan-all-due-every-cycle |
+| `SCHEDULER_STARTUP_ACQUIRE_DELAY` | `30000` | Grace period (ms) after boot during which an instance heartbeats but defers acquiring partition locks, so co-starting peers register first and initial ownership spreads by fair share. `0` disables; ignored when `SCHEDULER_TOTAL_PARTITIONS=1` |
 
 ---
 

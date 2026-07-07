@@ -193,6 +193,7 @@ All properties are under the `cce.scheduler` prefix.
 | `total-partitions` | `int` | `1` | `1` | `64` | Number of scan partitions. Each partition is an independent advisory lock. `1` = single-leader mode (default). Increase for horizontal scaling. Each instance owns at most its fair share (`ceil(total-partitions / active-instances)`), so fewer instances than partitions is safe — no orphaned partitions. |
 | `lock-acquire-delay-ms` | `int` | `50` | `0` | `500` | Max randomized jitter (ms) between consecutive advisory lock acquisition attempts, to stagger truly simultaneous starts. Secondary smoothing only — even distribution is enforced by the fair-share cap, not this delay. Set to `0` to disable. |
 | `watermark-enabled` | `boolean` | `true` | — | — | When `true`, each partition scan is bounded below by the persisted `scheduler_partition_cursor` watermark so already-emitted threshold crossings are not re-scanned every cycle (see §1.3). When `false`, every cycle scans all due rows up to now (legacy behavior) and the watermark is neither read nor advanced. |
+| `startup-acquire-delay-ms` | `long` (ms) | `0` | `0` | `300000` | Grace period after boot during which an instance heartbeats but **defers acquiring partition locks**, so co-starting peers register first and the initial ownership spreads by fair share instead of the first booter grabbing all. `0` disables it; ignored when `total-partitions = 1`. Enabled in the k8s ConfigMap (`30000`). See architecture-overview §4.2. |
 
 ---
 
