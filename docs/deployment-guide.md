@@ -38,6 +38,7 @@ All configuration is via environment variables. Defaults are suitable for local 
 | `SCHEDULER_LOCK_KEY`            | `100001`  | Base pg_advisory_lock key                            |
 | `SCHEDULER_TOTAL_PARTITIONS`    | `1`       | Number of partitions for multi-leader mode           |
 | `SCHEDULER_LOCK_ACQUIRE_DELAY`  | `50`      | Jitter between lock attempts (ms); even split is enforced by the fair-share cap, not this |
+| `SCHEDULER_WATERMARK_ENABLED`   | `true`    | Bound each scan below by the per-partition watermark so already-emitted crossings aren't re-published every cycle. `false` = legacy scan-all-due-every-cycle |
 
 ---
 

@@ -57,6 +57,9 @@ class SchedulerEndToEndIntegrationTest {
     @Mock
     private SchedulerTriggerProducer triggerProducer;
 
+    @Mock
+    private org.openphc.cce.scheduler.engine.PartitionCursorService partitionCursor;
+
     private SchedulerProperties properties;
     private SimpleMeterRegistry meterRegistry;
     private ObservabilityConfig metrics;
@@ -72,7 +75,7 @@ class SchedulerEndToEndIntegrationTest {
         metrics = new ObservabilityConfig(meterRegistry);
         transitionPublisher = new TransitionPublisher(triggerProducer, metrics);
         schedulerLoop = new SchedulerLoop(leaderElection, dueStepScanner,
-                transitionPublisher, properties, meterRegistry, metrics);
+                transitionPublisher, properties, meterRegistry, metrics, partitionCursor);
     }
 
     @Nested
@@ -199,7 +202,7 @@ class SchedulerEndToEndIntegrationTest {
         void setUpMultiPartition() {
             properties.setTotalPartitions(2);
             schedulerLoop = new SchedulerLoop(leaderElection, dueStepScanner,
-                    transitionPublisher, properties, meterRegistry, metrics);
+                    transitionPublisher, properties, meterRegistry, metrics, partitionCursor);
         }
 
         @Test
@@ -240,7 +243,7 @@ class SchedulerEndToEndIntegrationTest {
         void greedyAcquisition_oneInstanceOwnsAll() {
             properties.setTotalPartitions(3);
             schedulerLoop = new SchedulerLoop(leaderElection, dueStepScanner,
-                    transitionPublisher, properties, meterRegistry, metrics);
+                    transitionPublisher, properties, meterRegistry, metrics, partitionCursor);
 
             when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0, 1, 2));
             when(dueStepScanner.scan(anyInt(), eq(3))).thenReturn(Collections.emptyList());
@@ -259,7 +262,7 @@ class SchedulerEndToEndIntegrationTest {
 
             // Instance 1 owns partitions 0,1
             SchedulerLoop loop1 = new SchedulerLoop(leaderElection, dueStepScanner,
-                    transitionPublisher, properties, meterRegistry, metrics);
+                    transitionPublisher, properties, meterRegistry, metrics, partitionCursor);
             when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0, 1));
             when(dueStepScanner.scan(anyInt(), eq(3))).thenReturn(Collections.emptyList());
 
@@ -280,7 +283,7 @@ class SchedulerEndToEndIntegrationTest {
         void failover_survivingInstanceAcquiresOrphanedPartitions() {
             properties.setTotalPartitions(3);
             schedulerLoop = new SchedulerLoop(leaderElection, dueStepScanner,
-                    transitionPublisher, properties, meterRegistry, metrics);
+                    transitionPublisher, properties, meterRegistry, metrics, partitionCursor);
 
             // Initially instance owns only partition 0
             when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
@@ -367,7 +370,7 @@ class SchedulerEndToEndIntegrationTest {
         void scannerFailure_doesNotStopOtherPartitions() {
             properties.setTotalPartitions(3);
             schedulerLoop = new SchedulerLoop(leaderElection, dueStepScanner,
-                    transitionPublisher, properties, meterRegistry, metrics);
+                    transitionPublisher, properties, meterRegistry, metrics, partitionCursor);
 
             when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0, 1, 2));
             when(dueStepScanner.scan(0, 3)).thenThrow(new RuntimeException("DB timeout"));

@@ -107,14 +107,17 @@ src/main/java/org/openphc/cce/scheduler/
 │   ├── model/
 │   │   ├── StepInstance.java                 # Read-only entity (@Immutable)
 │   │   ├── SchedulerLease.java               # Singleton lease entity
+│   │   ├── PartitionCursor.java              # Per-partition scan watermark entity
 │   │   └── enums/
 │   │       └── StepState.java                # PENDING, DUE, OVERDUE, MISSED, COMPLETED, SKIPPED
 │   └── repository/
-│       ├── StepInstanceRepository.java       # Read-only queries
-│       └── SchedulerLeaseRepository.java     # Lease upsert
+│       ├── StepInstanceRepository.java       # Read-only queries (watermark-bounded)
+│       ├── SchedulerLeaseRepository.java     # Lease upsert
+│       └── PartitionCursorRepository.java    # Watermark upsert (monotonic, GREATEST)
 ├── engine/
-│   ├── SchedulerLoop.java                    # @Scheduled main loop with leader guard
-│   ├── DueStepScanner.java                   # PostgreSQL query + transition determination
+│   ├── SchedulerLoop.java                    # @Scheduled main loop with leader guard; advances watermark
+│   ├── DueStepScanner.java                   # PostgreSQL query + transition determination; reads watermark
+│   ├── PartitionCursorService.java           # Reads/advances the per-partition watermark
 │   ├── DueStep.java                          # Record: stepInstanceId, transitionType, metadata
 │   └── TransitionPublisher.java              # Orchestrates Kafka publish per DueStep
 ├── health/
@@ -151,18 +154,26 @@ Each instance only scans the **partitions** it owns (determined by acquired advi
 1. Partition leader check (any pg_advisory_locks held?)
    - If no locks held → skip this cycle, return immediately
 2. For each owned partition P in ownedPartitions:
-   a. DueStepScanner.scan(batchSize, P, totalPartitions)
-      - Query step_instance for rows where time thresholds are met
+   a. DueStepScanner.scan(P, totalPartitions)
+      - Read partition P's watermark from scheduler_partition_cursor (epoch if none)
+      - Query step_instance for rows where time thresholds are met AND the
+        state-specific threshold is STRICTLY GREATER than the watermark
       - Filter: MOD(ABS(HASHTEXT(protocol_instance_id::text)), totalPartitions) = P
-      - Determine transition type for each row
+      - Determine transition type for each row; ORDER BY threshold ASC
       - Return List<DueStep>
    b. TransitionPublisher.publish(dueSteps)
       - For each DueStep: build SchedulerTriggerMessage, publish to Kafka synchronously
       - Track success/failure counts
-   c. Update scheduler_lease heartbeat for partition P
-   d. Record metrics (scan duration, batch size, transitions by type, partition=P)
+   c. Advance watermark: if the whole batch published successfully, upsert the
+      largest emitted threshold into scheduler_partition_cursor for P (monotonic).
+      A partial failure leaves the watermark untouched → failed crossings retry
+      next cycle; empty cycles do not advance.
+   d. Update scheduler_lease heartbeat for partition P
+   e. Record metrics (scan duration, batch size, transitions by type, partition=P)
 3. Wait fixedDelay → repeat
 ```
+
+**Duplicate suppression:** Because the Scheduler is the reader and the Compliance Service is the sole writer of `step_instance.state`, a crossing whose state has not yet moved would otherwise re-match the query and be re-published on **every** cycle (unbounded while the consumer lags or is down). The per-partition watermark advances past emitted crossings so each threshold crossing is published **once** in the normal case. See `scheduler_partition_cursor` in the data dictionary for the accepted gaps (below-watermark inserts; publish-succeeded-but-never-applied; same-timestamp cohorts larger than `batch-size`).
 
 ### 4.2 Partitioned Leader Election Lifecycle
 
@@ -265,9 +276,10 @@ The Scheduler connects to the **same PostgreSQL database** (`ccedb`) as all othe
 
 | Table | Owner | Scheduler Access | Purpose |
 |---|---|---|---|
-| `step_instance` | Compliance Service | **Read-only** | Query for due transitions (partition-filtered) |
+| `step_instance` | Compliance Service | **Read-only** | Query for due transitions (partition-filtered, watermark-bounded) |
 | `scheduler_lease` | Scheduler Service | **Read-write** | Partition leader heartbeats (one row per partition) |
 | `scheduler_node` | Scheduler Service | **Read-write** | Live-instance registry (one row per instance) used to compute fair share |
+| `scheduler_partition_cursor` | Scheduler Service | **Read-write** | Per-partition scan watermark (one row per partition) preventing re-emission of already-published crossings |
 | All other tables | Compliance Service | **No access** | Not used by Scheduler |
 
 **Important:** The Scheduler uses `@Immutable` on its `StepInstance` entity to prevent accidental writes. The actual state transitions are performed by the Compliance Service after consuming `SchedulerTriggerMessage` from Kafka.

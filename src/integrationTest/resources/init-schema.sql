@@ -40,3 +40,10 @@ CREATE TABLE IF NOT EXISTS scheduler_lease (
 INSERT INTO scheduler_lease (id, partition_index) VALUES (gen_random_uuid(), 0) ON CONFLICT (partition_index) DO NOTHING;
 INSERT INTO scheduler_lease (id, partition_index) VALUES (gen_random_uuid(), 1) ON CONFLICT (partition_index) DO NOTHING;
 INSERT INTO scheduler_lease (id, partition_index) VALUES (gen_random_uuid(), 2) ON CONFLICT (partition_index) DO NOTHING;
+
+-- Scheduler per-partition scan watermark
+CREATE TABLE IF NOT EXISTS scheduler_partition_cursor (
+    partition_index INTEGER PRIMARY KEY,
+    watermark       TIMESTAMPTZ NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);

@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.never;
@@ -38,6 +39,9 @@ class SchedulerLoopTest {
     @Mock
     private TransitionPublisher transitionPublisher;
 
+    @Mock
+    private PartitionCursorService partitionCursor;
+
     private SchedulerProperties properties;
     private SimpleMeterRegistry meterRegistry;
     private ObservabilityConfig metrics;
@@ -50,7 +54,7 @@ class SchedulerLoopTest {
         meterRegistry = new SimpleMeterRegistry();
         metrics = new ObservabilityConfig(meterRegistry);
         schedulerLoop = new SchedulerLoop(leaderElection, dueStepScanner,
-                transitionPublisher, properties, meterRegistry, metrics);
+                transitionPublisher, properties, meterRegistry, metrics, partitionCursor);
     }
 
     @Test
@@ -142,12 +146,67 @@ class SchedulerLoopTest {
         assertThat(stepsCount).isEqualTo(3.0);
     }
 
+    @Test
+    void executeCycle_allPublished_advancesWatermarkToLastThreshold() {
+        OffsetDateTime earlier = OffsetDateTime.now(ZoneOffset.UTC).minusHours(2);
+        OffsetDateTime latest = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
+        // Scanner returns rows in threshold order; the loop advances to the LAST one.
+        List<DueStep> steps = List.of(buildDueStepAt(earlier), buildDueStepAt(latest));
+        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
+        when(dueStepScanner.scan(0, 4)).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps, 0)).thenReturn(2);
+
+        schedulerLoop.executeCycle();
+
+        verify(partitionCursor).advanceWatermark(0, latest);
+    }
+
+    @Test
+    void executeCycle_partialPublishFailure_doesNotAdvanceWatermark() {
+        List<DueStep> steps = List.of(buildDueStep(), buildDueStep());
+        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
+        when(dueStepScanner.scan(0, 4)).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps, 0)).thenReturn(1); // one failed
+
+        schedulerLoop.executeCycle();
+
+        verify(partitionCursor, never()).advanceWatermark(anyInt(), any());
+    }
+
+    @Test
+    void executeCycle_emptyBatch_doesNotAdvanceWatermark() {
+        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
+        when(dueStepScanner.scan(0, 4)).thenReturn(Collections.emptyList());
+        when(transitionPublisher.publishAll(anyList(), anyInt())).thenReturn(0);
+
+        schedulerLoop.executeCycle();
+
+        verify(partitionCursor, never()).advanceWatermark(anyInt(), any());
+    }
+
+    @Test
+    void executeCycle_watermarkDisabled_doesNotAdvanceWatermark() {
+        properties.setWatermarkEnabled(false);
+        List<DueStep> steps = List.of(buildDueStep());
+        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
+        when(dueStepScanner.scan(0, 4)).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps, 0)).thenReturn(1);
+
+        schedulerLoop.executeCycle();
+
+        verify(partitionCursor, never()).advanceWatermark(anyInt(), any());
+    }
+
     private DueStep buildDueStep() {
+        return buildDueStepAt(OffsetDateTime.now(ZoneOffset.UTC));
+    }
+
+    private DueStep buildDueStepAt(OffsetDateTime thresholdDate) {
         return new DueStep(
                 UUID.randomUUID(),
                 UUID.randomUUID(),
                 TransitionType.PENDING_TO_DUE,
-                OffsetDateTime.now(ZoneOffset.UTC),
+                thresholdDate,
                 JsonNodeFactory.instance.objectNode()
         );
     }

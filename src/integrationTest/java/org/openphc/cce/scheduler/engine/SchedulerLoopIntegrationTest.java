@@ -94,6 +94,7 @@ class SchedulerLoopIntegrationTest {
         consumer.subscribe(Collections.singletonList(TOPIC));
 
         jdbcTemplate.execute("DELETE FROM step_instance");
+        jdbcTemplate.execute("DELETE FROM scheduler_partition_cursor");
 
         // Ensure this instance is leader
         leaderElection.tryAcquirePartitions();

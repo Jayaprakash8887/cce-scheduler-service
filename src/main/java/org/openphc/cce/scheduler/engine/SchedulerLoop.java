@@ -10,6 +10,7 @@ import org.slf4j.MDC;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 
 @Component
@@ -22,19 +23,22 @@ public class SchedulerLoop {
     private final SchedulerProperties properties;
     private final MeterRegistry meterRegistry;
     private final ObservabilityConfig metrics;
+    private final PartitionCursorService partitionCursor;
 
     public SchedulerLoop(LeaderElection leaderElection,
                          DueStepScanner dueStepScanner,
                          TransitionPublisher transitionPublisher,
                          SchedulerProperties properties,
                          MeterRegistry meterRegistry,
-                         ObservabilityConfig metrics) {
+                         ObservabilityConfig metrics,
+                         PartitionCursorService partitionCursor) {
         this.leaderElection = leaderElection;
         this.dueStepScanner = dueStepScanner;
         this.transitionPublisher = transitionPublisher;
         this.properties = properties;
         this.meterRegistry = meterRegistry;
         this.metrics = metrics;
+        this.partitionCursor = partitionCursor;
     }
 
     @Scheduled(fixedDelayString = "${cce.scheduler.scan-interval}")
@@ -74,6 +78,9 @@ public class SchedulerLoop {
             // Publish transitions
             int published = transitionPublisher.publishAll(dueSteps, partitionIndex);
 
+            // Commit scan progress: advance the watermark past the emitted crossings
+            advanceWatermark(partitionIndex, dueSteps, published);
+
             // Record scan duration
             timerSample.stop(metrics.scanDurationTimer(partition));
 
@@ -89,5 +96,22 @@ public class SchedulerLoop {
         } finally {
             MDC.remove("currentPartition");
         }
+    }
+
+    /**
+     * Advances the partition watermark to the largest threshold emitted this cycle
+     * (the last row of the scan's {@code ORDER BY threshold ASC} result), but only
+     * when the whole batch published successfully. A partial failure leaves the
+     * watermark untouched so the failed (and re-published) crossings are retried
+     * next cycle — transient Kafka failures never strand a batch. Empty cycles do
+     * not advance.
+     */
+    private void advanceWatermark(int partitionIndex, List<DueStep> dueSteps, int published) {
+        if (!properties.isWatermarkEnabled() || dueSteps.isEmpty() || published != dueSteps.size()) {
+            return;
+        }
+        OffsetDateTime maxThreshold = dueSteps.get(dueSteps.size() - 1).thresholdDate();
+        partitionCursor.advanceWatermark(partitionIndex, maxThreshold);
+        log.debug("Advanced watermark for partition {} to {}", partitionIndex, maxThreshold);
     }
 }

@@ -143,6 +143,7 @@ The Compliance Service consumes from `cce.scheduler.triggers` with these expecta
 | **At-least-once delivery** | Synchronous publish + idempotent producer |
 | **Idempotency (producer)** | `enable.idempotence=true` prevents duplicate publishes on retry |
 | **Idempotency (consumer)** | Compliance Service checks current step state before applying transition |
+| **No per-cycle re-emission** | A per-partition scan watermark (`scheduler_partition_cursor`) advances past crossings that were published successfully, so a crossing is normally emitted **once** rather than re-published every scan cycle while a step's state is frozen. See the data dictionary for accepted gaps. |
 | **Ordering (per partition)** | Key = `protocolInstanceId` ensures all transitions for a protocol are ordered. The Scheduler’s hash-partitioning by `protocol_instance_id` guarantees a given protocol is always scanned by the same Scheduler instance, preserving transition ordering even with multiple concurrent instances. |
 | **Durability** | `acks=all` waits for all ISR replicas |
 
@@ -157,4 +158,4 @@ The Compliance Service consumes from `cce.scheduler.triggers` with these expecta
 | Serialization error | Should not occur (fixed schema) | Log and skip |
 | All publishes fail in a cycle | Metrics show 100% failure rate | Alert via `cce.scheduler.publish.failure` metric |
 
-The Scheduler does **not** publish to `cce.deadletter` — failed transitions are simply retried on the next scan cycle since the step's date threshold is still crossed.
+The Scheduler does **not** publish to `cce.deadletter` — failed transitions are simply retried on the next scan cycle. The scan watermark only advances when **every** trigger in a cycle publishes successfully, so a failed publish leaves the watermark in place and its crossing is re-scanned (and retried) next cycle. This preserves at-least-once delivery for transient failures while still preventing re-emission of the crossings that *did* succeed.

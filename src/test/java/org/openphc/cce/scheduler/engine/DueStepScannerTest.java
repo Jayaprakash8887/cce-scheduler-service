@@ -22,6 +22,10 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -30,6 +34,9 @@ class DueStepScannerTest {
     @Mock
     private StepInstanceRepository stepInstanceRepository;
 
+    @Mock
+    private PartitionCursorService partitionCursor;
+
     private SchedulerProperties properties;
     private DueStepScanner scanner;
 
@@ -37,12 +44,14 @@ class DueStepScannerTest {
     void setUp() {
         properties = new SchedulerProperties();
         properties.setBatchSize(100);
-        scanner = new DueStepScanner(stepInstanceRepository, properties);
+        scanner = new DueStepScanner(stepInstanceRepository, properties, partitionCursor);
+        lenient().when(partitionCursor.readWatermark(anyInt()))
+                .thenReturn(PartitionCursorService.BEGINNING);
     }
 
     @Test
     void scan_emptyResult_returnsEmptyList() {
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), anyInt(), anyInt(), anyInt()))
                 .thenReturn(Collections.emptyList());
 
         List<DueStep> result = scanner.scan(0, 1);
@@ -55,7 +64,7 @@ class DueStepScannerTest {
         StepInstance step = buildStepInstance(StepState.PENDING,
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
 
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), anyInt(), anyInt(), anyInt()))
                 .thenReturn(List.of(step));
 
         List<DueStep> result = scanner.scan(0, 1);
@@ -73,7 +82,7 @@ class DueStepScannerTest {
         OffsetDateTime overdueDate = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(30);
         StepInstance step = buildStepInstance(StepState.DUE, null, overdueDate, null);
 
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), anyInt(), anyInt(), anyInt()))
                 .thenReturn(List.of(step));
 
         List<DueStep> result = scanner.scan(0, 1);
@@ -88,7 +97,7 @@ class DueStepScannerTest {
         OffsetDateTime missedDate = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
         StepInstance step = buildStepInstance(StepState.OVERDUE, null, null, missedDate);
 
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), anyInt(), anyInt(), anyInt()))
                 .thenReturn(List.of(step));
 
         List<DueStep> result = scanner.scan(0, 1);
@@ -103,7 +112,7 @@ class DueStepScannerTest {
         StepInstance step = buildStepInstance(StepState.PENDING,
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
 
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), anyInt(), anyInt(), anyInt()))
                 .thenReturn(List.of(step));
 
         List<DueStep> result = scanner.scan(0, 1);
@@ -121,7 +130,7 @@ class DueStepScannerTest {
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
         setField(step, "requiredBehavior", "MUST");
 
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), anyInt(), anyInt(), anyInt()))
                 .thenReturn(List.of(step));
 
         List<DueStep> result = scanner.scan(0, 1);
@@ -136,7 +145,7 @@ class DueStepScannerTest {
         StepInstance step = buildStepInstance(StepState.PENDING,
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
 
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), anyInt(), anyInt(), anyInt()))
                 .thenReturn(List.of(step));
 
         List<DueStep> result = scanner.scan(0, 1);
@@ -154,7 +163,7 @@ class DueStepScannerTest {
         StepInstance overdue = buildStepInstance(StepState.OVERDUE, null, null,
                 OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(30));
 
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), anyInt(), anyInt(), anyInt()))
                 .thenReturn(List.of(pending, due, overdue));
 
         List<DueStep> result = scanner.scan(0, 1);
@@ -167,16 +176,43 @@ class DueStepScannerTest {
 
     @Test
     void scan_passesPartitionParametersToRepository() {
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), anyInt(), anyInt(), anyInt()))
                 .thenReturn(Collections.emptyList());
 
         scanner.scan(3, 8);
 
         org.mockito.Mockito.verify(stepInstanceRepository)
                 .findDueSteps(any(OffsetDateTime.class),
+                        any(OffsetDateTime.class),
                         org.mockito.ArgumentMatchers.eq(3),
                         org.mockito.ArgumentMatchers.eq(8),
                         org.mockito.ArgumentMatchers.eq(100));
+    }
+
+    @Test
+    void scan_watermarkEnabled_passesReadWatermarkToRepository() {
+        OffsetDateTime watermark = OffsetDateTime.now(ZoneOffset.UTC).minusDays(1);
+        when(partitionCursor.readWatermark(2)).thenReturn(watermark);
+        when(stepInstanceRepository.findDueSteps(any(), any(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(Collections.emptyList());
+
+        scanner.scan(2, 4);
+
+        verify(stepInstanceRepository).findDueSteps(
+                any(OffsetDateTime.class), eq(watermark), eq(2), eq(4), eq(100));
+    }
+
+    @Test
+    void scan_watermarkDisabled_passesBeginningAndSkipsCursorRead() {
+        properties.setWatermarkEnabled(false);
+        when(stepInstanceRepository.findDueSteps(any(), any(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(Collections.emptyList());
+
+        scanner.scan(0, 1);
+
+        verify(stepInstanceRepository).findDueSteps(
+                any(OffsetDateTime.class), eq(PartitionCursorService.BEGINNING), eq(0), eq(1), eq(100));
+        verify(partitionCursor, never()).readWatermark(anyInt());
     }
 
     private StepInstance buildStepInstance(StepState state,

@@ -67,7 +67,35 @@ CREATE TABLE scheduler_node (
 CREATE INDEX idx_scheduler_node_heartbeat ON scheduler_node (last_heartbeat);
 ```
 
-### 1.3 `step_instance` — Read-Only View (Owned by Compliance Service)
+### 1.3 `scheduler_partition_cursor` — Per-Partition Scan Watermark
+
+One row **per partition**, holding the scan watermark: the exclusive lower bound of the scan window. The scan considers only `step_instance` rows whose state-specific threshold is **strictly greater** than this watermark, and `SchedulerLoop` advances it to the largest threshold emitted after a **fully successful** publish cycle. This stops the scheduler from re-selecting and re-publishing the same threshold crossing on every cycle while a step's state is frozen (e.g., while the Compliance Service is lagging or down), which is the primary cause of duplicate events in `cce.scheduler.triggers`.
+
+Written only by the partition's **current owner** (serialized by the advisory lock), so there is no cross-writer contention. The `GREATEST` upsert makes the write monotonic — a stale/clock-skewed value from a new owner after failover can never move the watermark backwards.
+
+**Migration:** `V3__create_scheduler_partition_cursor.sql`  
+**Owner:** Scheduler Service (read-write)
+
+| Column | Type | Nullable | Default | Description |
+|--------|------|----------|---------|-------------|
+| `partition_index` | `INTEGER` | No | — | Primary key — partition number this watermark belongs to (0-based). |
+| `watermark` | `TIMESTAMPTZ` | No | — | Exclusive lower bound of the scan window (full microsecond precision). No cursor row ⇒ treated as the epoch (first scan sees the full due backlog up to now). |
+| `updated_at` | `TIMESTAMPTZ` | No | `now()` | Last time the watermark advanced (observability). |
+
+**Constraints:**
+- `PK`: `partition_index`
+
+```sql
+CREATE TABLE scheduler_partition_cursor (
+    partition_index INTEGER PRIMARY KEY,
+    watermark       TIMESTAMPTZ NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+> **Known gaps (accepted; addressed elsewhere):** (a) a step created with a threshold **below** the current watermark (backfill / backdated start / clock skew) is never scanned; (b) a trigger published to Kafka but never applied by the Compliance Service is not re-driven (transient publish **failures** *are* retried, because the watermark advances only when every trigger in the cycle succeeds); (c) if **more than `batch-size`** steps share an **identical threshold timestamp**, the overflow beyond the batch boundary at that exact instant is skipped — mitigate by keeping `batch-size` above the largest expected same-instant cohort (relevant when thresholds are calendar dates rather than distinct per-step timestamps).
+
+### 1.4 `step_instance` — Read-Only View (Owned by Compliance Service)
 
 The Scheduler reads this table to find steps that need time-based transitions. **The Scheduler never writes to this table.**
 
@@ -164,6 +192,7 @@ All properties are under the `cce.scheduler` prefix.
 | `advisory-lock-key` | `long` | `100001` | — | — | Base PostgreSQL advisory lock key. Partitions use keys `advisory-lock-key + 0` through `advisory-lock-key + total-partitions - 1`. |
 | `total-partitions` | `int` | `1` | `1` | `64` | Number of scan partitions. Each partition is an independent advisory lock. `1` = single-leader mode (default). Increase for horizontal scaling. Each instance owns at most its fair share (`ceil(total-partitions / active-instances)`), so fewer instances than partitions is safe — no orphaned partitions. |
 | `lock-acquire-delay-ms` | `int` | `50` | `0` | `500` | Max randomized jitter (ms) between consecutive advisory lock acquisition attempts, to stagger truly simultaneous starts. Secondary smoothing only — even distribution is enforced by the fair-share cap, not this delay. Set to `0` to disable. |
+| `watermark-enabled` | `boolean` | `true` | — | — | When `true`, each partition scan is bounded below by the persisted `scheduler_partition_cursor` watermark so already-emitted threshold crossings are not re-scanned every cycle (see §1.3). When `false`, every cycle scans all due rows up to now (legacy behavior) and the watermark is neither read nor advanced. |
 
 ---
 

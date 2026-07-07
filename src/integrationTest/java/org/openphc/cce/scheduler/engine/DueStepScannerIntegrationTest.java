@@ -49,6 +49,9 @@ class DueStepScannerIntegrationTest {
     private StepInstanceRepository stepInstanceRepository;
 
     @Autowired
+    private PartitionCursorService partitionCursor;
+
+    @Autowired
     private JdbcTemplate jdbcTemplate;
 
     private DueStepScanner scanner;
@@ -57,9 +60,10 @@ class DueStepScannerIntegrationTest {
     void setUp() {
         SchedulerProperties properties = new SchedulerProperties();
         properties.setBatchSize(100);
-        scanner = new DueStepScanner(stepInstanceRepository, properties);
+        scanner = new DueStepScanner(stepInstanceRepository, properties, partitionCursor);
 
         jdbcTemplate.execute("DELETE FROM step_instance");
+        jdbcTemplate.execute("DELETE FROM scheduler_partition_cursor");
     }
 
     @Test
@@ -181,6 +185,32 @@ class DueStepScannerIntegrationTest {
         assertThat(result).hasSize(3);
         assertThat(result.get(0).thresholdDate()).isBeforeOrEqualTo(result.get(1).thresholdDate());
         assertThat(result.get(1).thresholdDate()).isBeforeOrEqualTo(result.get(2).thresholdDate());
+    }
+
+    @Test
+    void scan_distinctThresholds_drainAcrossCyclesViaWatermark() {
+        // Three PENDING steps with DISTINCT due_dates and a batch size of 2.
+        // The watermark advances past the emitted rows so the cohort drains
+        // across cycles without re-emitting or skipping.
+        OffsetDateTime base = OffsetDateTime.now(ZoneOffset.UTC).minusHours(3);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", base, null, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", base.plusMinutes(1), null, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", base.plusMinutes(2), null, null);
+
+        SchedulerProperties smallBatch = new SchedulerProperties();
+        smallBatch.setBatchSize(2);
+        DueStepScanner pagedScanner = new DueStepScanner(stepInstanceRepository, smallBatch, partitionCursor);
+
+        List<DueStep> firstCycle = pagedScanner.scan(0, 1);
+        assertThat(firstCycle).hasSize(2);
+        DueStep last = firstCycle.get(firstCycle.size() - 1);
+        partitionCursor.advanceWatermark(0, last.thresholdDate());
+
+        List<DueStep> secondCycle = pagedScanner.scan(0, 1);
+        assertThat(secondCycle).hasSize(1); // the third step, not re-emitted
+
+        List<UUID> firstIds = firstCycle.stream().map(DueStep::stepInstanceId).toList();
+        assertThat(secondCycle.get(0).stepInstanceId()).isNotIn(firstIds);
     }
 
     @Test

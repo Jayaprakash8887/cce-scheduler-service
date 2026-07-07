@@ -38,4 +38,11 @@ public class SchedulerProperties {
     @Min(0)
     @Max(500)
     private int lockAcquireDelayMs = 50;
+
+    /**
+     * When true, each partition scan is bounded below by a persisted per-partition
+     * watermark so already-emitted threshold crossings are not re-scanned every cycle.
+     * When false, every cycle scans all due rows up to now (legacy behavior).
+     */
+    private boolean watermarkEnabled = true;
 }
