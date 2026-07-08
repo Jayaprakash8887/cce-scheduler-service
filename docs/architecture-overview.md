@@ -113,7 +113,7 @@ src/main/java/org/openphc/cce/scheduler/
 │   └── repository/
 │       ├── StepInstanceRepository.java       # Read-only queries (watermark-bounded)
 │       ├── SchedulerLeaseRepository.java     # Lease upsert
-│       └── PartitionCursorRepository.java    # Watermark upsert (monotonic, GREATEST)
+│       └── PartitionCursorRepository.java    # Keyset cursor upsert (monotonic, ROW guard)
 ├── engine/
 │   ├── SchedulerLoop.java                    # @Scheduled main loop with leader guard; advances watermark
 │   ├── DueStepScanner.java                   # PostgreSQL query + transition determination; reads watermark
@@ -155,25 +155,26 @@ Each instance only scans the **partitions** it owns (determined by acquired advi
    - If no locks held → skip this cycle, return immediately
 2. For each owned partition P in ownedPartitions:
    a. DueStepScanner.scan(P, totalPartitions)
-      - Read partition P's watermark from scheduler_partition_cursor (epoch if none)
-      - Query step_instance for rows where time thresholds are met AND the
-        state-specific threshold is STRICTLY GREATER than the watermark
+      - Read partition P's cursor (watermark, watermark_id) from
+        scheduler_partition_cursor (epoch + min-UUID if none)
+      - Query step_instance for rows where time thresholds are met AND the row
+        sorts STRICTLY AFTER (watermark, watermark_id) in (threshold, id) order
       - Filter: MOD(ABS(HASHTEXT(protocol_instance_id::text)), totalPartitions) = P
-      - Determine transition type for each row; ORDER BY threshold ASC
+      - Determine transition type for each row; ORDER BY (threshold, id)
       - Return List<DueStep>
    b. TransitionPublisher.publish(dueSteps)
       - For each DueStep: build SchedulerTriggerMessage, publish to Kafka synchronously
       - Track success/failure counts
-   c. Advance watermark: if the whole batch published successfully, upsert the
-      largest emitted threshold into scheduler_partition_cursor for P (monotonic).
-      A partial failure leaves the watermark untouched → failed crossings retry
-      next cycle; empty cycles do not advance.
+   c. Advance cursor: if the whole batch published successfully, upsert the
+      LAST emitted (threshold, id) into scheduler_partition_cursor for P
+      (monotonic in (timestamp, id) order). A partial failure leaves the cursor
+      untouched → failed crossings retry next cycle; empty cycles do not advance.
    d. Update scheduler_lease heartbeat for partition P
    e. Record metrics (scan duration, batch size, transitions by type, partition=P)
 3. Wait fixedDelay → repeat
 ```
 
-**Duplicate suppression:** Because the Scheduler is the reader and the Compliance Service is the sole writer of `step_instance.state`, a crossing whose state has not yet moved would otherwise re-match the query and be re-published on **every** cycle (unbounded while the consumer lags or is down). The per-partition watermark advances past emitted crossings so each threshold crossing is published **once** in the normal case. See `scheduler_partition_cursor` in the data dictionary for the accepted gaps (below-watermark inserts; publish-succeeded-but-never-applied; same-timestamp cohorts larger than `batch-size`).
+**Duplicate suppression:** Because the Scheduler is the reader and the Compliance Service is the sole writer of `step_instance.state`, a crossing whose state has not yet moved would otherwise re-match the query and be re-published on **every** cycle (unbounded while the consumer lags or is down). The per-partition `(threshold, id)` keyset cursor advances past emitted crossings so each threshold crossing is published **once** in the normal case. Using the step's UUID v7 `id` as the tie-breaker means a same-timestamp cohort larger than `batch-size` drains across cycles (in creation order) instead of being truncated. See `scheduler_partition_cursor` in the data dictionary for the accepted gaps (below-cursor inserts; publish-succeeded-but-never-applied).
 
 ### 4.2 Partitioned Leader Election Lifecycle
 

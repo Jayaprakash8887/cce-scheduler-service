@@ -188,14 +188,14 @@ class DueStepScannerIntegrationTest {
     }
 
     @Test
-    void scan_distinctThresholds_drainAcrossCyclesViaWatermark() {
-        // Three PENDING steps with DISTINCT due_dates and a batch size of 2.
-        // The watermark advances past the emitted rows so the cohort drains
-        // across cycles without re-emitting or skipping.
-        OffsetDateTime base = OffsetDateTime.now(ZoneOffset.UTC).minusHours(3);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", base, null, null);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", base.plusMinutes(1), null, null);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", base.plusMinutes(2), null, null);
+    void scan_identicalThresholds_drainAcrossCyclesViaKeyset() {
+        // Three PENDING steps sharing the EXACT same due_date — a cohort larger
+        // than the batch size. The keyset (threshold, id) cursor must drain them
+        // across cycles without skipping any (gap "c" closed by the id tie-break).
+        OffsetDateTime sameDue = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null, null);
 
         SchedulerProperties smallBatch = new SchedulerProperties();
         smallBatch.setBatchSize(2);
@@ -204,10 +204,10 @@ class DueStepScannerIntegrationTest {
         List<DueStep> firstCycle = pagedScanner.scan(0, 1);
         assertThat(firstCycle).hasSize(2);
         DueStep last = firstCycle.get(firstCycle.size() - 1);
-        partitionCursor.advanceWatermark(0, last.thresholdDate());
+        partitionCursor.advanceWatermark(0, last.thresholdDate(), last.stepInstanceId());
 
         List<DueStep> secondCycle = pagedScanner.scan(0, 1);
-        assertThat(secondCycle).hasSize(1); // the third step, not re-emitted
+        assertThat(secondCycle).hasSize(1); // the third step, not skipped
 
         List<UUID> firstIds = firstCycle.stream().map(DueStep::stepInstanceId).toList();
         assertThat(secondCycle.get(0).stepInstanceId()).isNotIn(firstIds);

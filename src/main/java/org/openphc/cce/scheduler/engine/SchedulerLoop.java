@@ -10,7 +10,6 @@ import org.slf4j.MDC;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import java.time.OffsetDateTime;
 import java.util.List;
 
 @Component
@@ -99,19 +98,23 @@ public class SchedulerLoop {
     }
 
     /**
-     * Advances the partition watermark to the largest threshold emitted this cycle
-     * (the last row of the scan's {@code ORDER BY threshold ASC} result), but only
-     * when the whole batch published successfully. A partial failure leaves the
-     * watermark untouched so the failed (and re-published) crossings are retried
-     * next cycle — transient Kafka failures never strand a batch. Empty cycles do
-     * not advance.
+     * Advances the partition cursor to the last emitted {@code (threshold, id)} this
+     * cycle, but only when the whole batch published successfully. A partial failure
+     * leaves the cursor untouched so the failed (and re-published) crossings are
+     * retried next cycle — transient Kafka failures never strand a batch. Empty cycles
+     * do not advance.
+     *
+     * <p>The last element is taken by the scan's {@code ORDER BY (threshold, id)} order
+     * (preserved through the repository/list), NOT by re-sorting in Java — Postgres and
+     * {@code UUID.compareTo} order UUIDs differently, so only the DB order is authoritative.
      */
     private void advanceWatermark(int partitionIndex, List<DueStep> dueSteps, int published) {
         if (!properties.isWatermarkEnabled() || dueSteps.isEmpty() || published != dueSteps.size()) {
             return;
         }
-        OffsetDateTime maxThreshold = dueSteps.get(dueSteps.size() - 1).thresholdDate();
-        partitionCursor.advanceWatermark(partitionIndex, maxThreshold);
-        log.debug("Advanced watermark for partition {} to {}", partitionIndex, maxThreshold);
+        DueStep last = dueSteps.get(dueSteps.size() - 1);
+        partitionCursor.advanceWatermark(partitionIndex, last.thresholdDate(), last.stepInstanceId());
+        log.debug("Advanced cursor for partition {} to ({},{})",
+                partitionIndex, last.thresholdDate(), last.stepInstanceId());
     }
 }

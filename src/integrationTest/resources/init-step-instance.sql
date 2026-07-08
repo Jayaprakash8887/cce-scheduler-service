@@ -31,5 +31,6 @@ ON CONFLICT (partition_index) DO NOTHING;
 CREATE TABLE IF NOT EXISTS scheduler_partition_cursor (
     partition_index INTEGER PRIMARY KEY,
     watermark       TIMESTAMPTZ NOT NULL,
+    watermark_id    UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -69,18 +69,21 @@ CREATE INDEX idx_scheduler_node_heartbeat ON scheduler_node (last_heartbeat);
 
 ### 1.3 `scheduler_partition_cursor` — Per-Partition Scan Watermark
 
-One row **per partition**, holding the scan watermark: the exclusive lower bound of the scan window. The scan considers only `step_instance` rows whose state-specific threshold is **strictly greater** than this watermark, and `SchedulerLoop` advances it to the largest threshold emitted after a **fully successful** publish cycle. This stops the scheduler from re-selecting and re-publishing the same threshold crossing on every cycle while a step's state is frozen (e.g., while the Compliance Service is lagging or down), which is the primary cause of duplicate events in `cce.scheduler.triggers`.
+One row **per partition**, holding the scan cursor as a **keyset/seek cursor over the composite key `(threshold, step_id)`** — the exclusive lower bound of the scan window. The scan considers only `step_instance` rows that sort **strictly after** `(watermark, watermark_id)` (i.e. `eff_threshold > watermark`, or `eff_threshold = watermark AND id > watermark_id`), and `SchedulerLoop` advances the cursor to the **last emitted** `(threshold, id)` after a **fully successful** publish cycle. This stops the scheduler from re-selecting and re-publishing the same threshold crossing on every cycle while a step's state is frozen (e.g., while the Compliance Service is lagging or down), which is the primary cause of duplicate events in `cce.scheduler.triggers`.
 
-Written only by the partition's **current owner** (serialized by the advisory lock), so there is no cross-writer contention. The `GREATEST` upsert makes the write monotonic — a stale/clock-skewed value from a new owner after failover can never move the watermark backwards.
+The `id` component (a **UUID v7** from the Compliance Service, as of its v4→v7 change) breaks threshold ties, so a cohort of steps sharing an **identical threshold** (calendar-date schedules, bulk backfills) drains across cycles `batch-size` at a time — no truncation, no stall — and, because v7 is time-ordered by creation, in creation (FIFO) order. Note the id is only a **tie-breaker under `threshold`**, never the primary cursor: a v7 id encodes *creation* time, not the due/overdue/missed threshold, so ordering by id alone would strand later-due-but-earlier-created steps. Correctness needs only a **total order** over `id`, which Postgres's `uuid` type provides for any version — so pre-change **v4** rows and post-change **v7** rows coexist safely (the FIFO-within-cohort property just applies to the v7 rows).
+
+Written only by the partition's **current owner** (serialized by the advisory lock), so there is no cross-writer contention. The upsert's `WHERE ROW(new) > ROW(old)` guard makes the write monotonic in lexical `(timestamp, id)` order — a stale/clock-skewed value from a new owner after failover can never move the cursor backwards.
 
 **Migration:** `V3__create_scheduler_partition_cursor.sql`  
 **Owner:** Scheduler Service (read-write)
 
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
-| `partition_index` | `INTEGER` | No | — | Primary key — partition number this watermark belongs to (0-based). |
-| `watermark` | `TIMESTAMPTZ` | No | — | Exclusive lower bound of the scan window (full microsecond precision). No cursor row ⇒ treated as the epoch (first scan sees the full due backlog up to now). |
-| `updated_at` | `TIMESTAMPTZ` | No | `now()` | Last time the watermark advanced (observability). |
+| `partition_index` | `INTEGER` | No | — | Primary key — partition number this cursor belongs to (0-based). |
+| `watermark` | `TIMESTAMPTZ` | No | — | Timestamp component of the cursor (full microsecond precision). No cursor row ⇒ treated as the epoch (first scan sees the full due backlog up to now). |
+| `watermark_id` | `UUID` | No | `00000000-…-000000000000` | Id component — the `step_instance.id` (UUID v7) of the last emitted step at `watermark`. The min-UUID default sorts before every real id. |
+| `updated_at` | `TIMESTAMPTZ` | No | `now()` | Last time the cursor advanced (observability). |
 
 **Constraints:**
 - `PK`: `partition_index`
@@ -89,11 +92,12 @@ Written only by the partition's **current owner** (serialized by the advisory lo
 CREATE TABLE scheduler_partition_cursor (
     partition_index INTEGER PRIMARY KEY,
     watermark       TIMESTAMPTZ NOT NULL,
+    watermark_id    UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 
-> **Known gaps (accepted; addressed elsewhere):** (a) a step created with a threshold **below** the current watermark (backfill / backdated start / clock skew) is never scanned; (b) a trigger published to Kafka but never applied by the Compliance Service is not re-driven (transient publish **failures** *are* retried, because the watermark advances only when every trigger in the cycle succeeds); (c) if **more than `batch-size`** steps share an **identical threshold timestamp**, the overflow beyond the batch boundary at that exact instant is skipped — mitigate by keeping `batch-size` above the largest expected same-instant cohort (relevant when thresholds are calendar dates rather than distinct per-step timestamps).
+> **Known gaps (accepted; addressed elsewhere):** (a) a step whose `(threshold, id)` sorts **below** the current cursor — backfill / backdated start / clock skew, or a late crossing at exactly the `watermark` instant with `id < watermark_id` — is never scanned; (b) a trigger published to Kafka but never applied by the Compliance Service is not re-driven (transient publish **failures** *are* retried, because the cursor advances only when every trigger in the cycle succeeds). The former same-timestamp-cohort truncation is **resolved** by the `(threshold, id)` keyset cursor.
 
 ### 1.4 `step_instance` — Read-Only View (Owned by Compliance Service)
 

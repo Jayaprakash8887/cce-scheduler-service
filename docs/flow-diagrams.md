@@ -26,8 +26,8 @@ sequenceDiagram
         else ownedPartitions = [P1, P2, ...]
             loop For each owned partition P
                 SL->>Scanner: scan(P, totalPartitions)
-                Scanner->>DB: SELECT watermark FROM scheduler_partition_cursor<br/>WHERE partition_index=P (epoch if none)
-                Scanner->>DB: SELECT step_instance<br/>WHERE state/date thresholds met<br/>AND threshold &gt; watermark<br/>AND MOD(ABS(HASHTEXT(protocol_instance_id)), N) = P<br/>ORDER BY threshold ASC<br/>LIMIT batchSize
+                Scanner->>DB: SELECT watermark, watermark_id FROM scheduler_partition_cursor<br/>WHERE partition_index=P (epoch + min-UUID if none)
+                Scanner->>DB: SELECT step_instance<br/>WHERE state/date thresholds met<br/>AND (threshold, id) &gt; (watermark, watermark_id)<br/>AND MOD(ABS(HASHTEXT(protocol_instance_id)), N) = P<br/>ORDER BY threshold ASC, id ASC<br/>LIMIT batchSize
                 DB-->>Scanner: List of StepInstance
                 Scanner-->>SL: List of DueStep
 
@@ -39,7 +39,7 @@ sequenceDiagram
                         Publisher->>Metrics: publish.success++ (partition=P)
                     end
                     opt All published successfully
-                        SL->>DB: UPSERT scheduler_partition_cursor<br/>SET watermark=GREATEST(watermark, max emitted threshold)<br/>WHERE partition_index=P
+                        SL->>DB: UPSERT scheduler_partition_cursor<br/>SET (watermark, watermark_id) = last emitted (threshold, id)<br/>WHERE new &gt; old (monotonic), partition_index=P
                     end
                 end
 
@@ -110,9 +110,9 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["DueStepScanner.scan(P, N)"] --> A2["Read watermark W for P<br/>(epoch if no cursor row)"]
+    A["DueStepScanner.scan(P, N)"] --> A2["Read cursor (W, Wid) for P<br/>(epoch + min-UUID if no row)"]
     A2 --> B["Query PostgreSQL"]
-    B --> C["SELECT steps WHERE<br/>(PENDING AND W < dueDate ≤ now) OR<br/>(DUE AND W < overdueDate ≤ now) OR<br/>(OVERDUE AND W < missedDate ≤ now)<br/>AND MOD(ABS(HASHTEXT(protocol_instance_id::text)), N) = P<br/>ORDER BY threshold ASC<br/>LIMIT batchSize"]
+    B --> C["SELECT steps WHERE<br/>threshold ≤ now AND (threshold, id) > (W, Wid)<br/>evaluated per state (PENDING→dueDate,<br/>DUE→overdueDate, OVERDUE→missedDate)<br/>AND MOD(ABS(HASHTEXT(protocol_instance_id::text)), N) = P<br/>ORDER BY threshold ASC, id ASC<br/>LIMIT batchSize"]
     C --> D{"Results empty?"}
     D -->|"Yes"| E["Return empty list"]
     D -->|"No"| F["For each StepInstance"]
@@ -134,7 +134,7 @@ flowchart TD
     style M fill:#27AE60,color:white
 ```
 
-> **P** = this instance’s `partitionIndex`, **N** = `totalPartitions`, **W** = partition P's scan watermark. When N=1, the `MOD(...)` clause is always 0 = P, effectively a no-op (full table scan). **W** is the exclusive lower bound: the scan skips crossings already emitted in a prior cycle. `SchedulerLoop` advances W to the largest emitted threshold after a fully successful publish (`watermark-enabled=true`, the default). Set `watermark-enabled=false` to disable and scan all due rows every cycle. Note: a same-timestamp cohort larger than `batch-size` may skip its overflow (accepted gap (c) — keep `batch-size` above the largest expected same-instant cohort).
+> **P** = this instance’s `partitionIndex`, **N** = `totalPartitions`, **(W, Wid)** = partition P's keyset scan cursor `(threshold, step id)`. When N=1, the `MOD(...)` clause is always 0 = P, effectively a no-op (full table scan). The cursor is the exclusive lower bound in `(threshold, id)` order: the scan skips crossings already emitted in a prior cycle, and the UUID v7 `id` tie-breaker lets a same-timestamp cohort larger than `batch-size` drain across cycles (in creation order) rather than being truncated. `SchedulerLoop` advances the cursor to the last emitted `(threshold, id)` after a fully successful publish (`watermark-enabled=true`, the default). Set `watermark-enabled=false` to disable and scan all due rows every cycle.
 ### Indexing & Query Optimization Notes
 
 **Indexes on `step_instance` (owned by Compliance Service):**

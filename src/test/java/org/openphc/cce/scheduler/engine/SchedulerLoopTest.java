@@ -147,18 +147,20 @@ class SchedulerLoopTest {
     }
 
     @Test
-    void executeCycle_allPublished_advancesWatermarkToLastThreshold() {
+    void executeCycle_allPublished_advancesCursorToLastEmitted() {
         OffsetDateTime earlier = OffsetDateTime.now(ZoneOffset.UTC).minusHours(2);
         OffsetDateTime latest = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
-        // Scanner returns rows in threshold order; the loop advances to the LAST one.
-        List<DueStep> steps = List.of(buildDueStepAt(earlier), buildDueStepAt(latest));
+        DueStep first = buildDueStepAt(earlier);
+        DueStep last = buildDueStepAt(latest);
+        // Scanner returns rows in (threshold, id) order; the loop advances to the LAST one.
+        List<DueStep> steps = List.of(first, last);
         when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
         when(dueStepScanner.scan(0, 4)).thenReturn(steps);
         when(transitionPublisher.publishAll(steps, 0)).thenReturn(2);
 
         schedulerLoop.executeCycle();
 
-        verify(partitionCursor).advanceWatermark(0, latest);
+        verify(partitionCursor).advanceWatermark(0, latest, last.stepInstanceId());
     }
 
     @Test
@@ -170,7 +172,7 @@ class SchedulerLoopTest {
 
         schedulerLoop.executeCycle();
 
-        verify(partitionCursor, never()).advanceWatermark(anyInt(), any());
+        verify(partitionCursor, never()).advanceWatermark(anyInt(), any(), any());
     }
 
     @Test
@@ -181,7 +183,7 @@ class SchedulerLoopTest {
 
         schedulerLoop.executeCycle();
 
-        verify(partitionCursor, never()).advanceWatermark(anyInt(), any());
+        verify(partitionCursor, never()).advanceWatermark(anyInt(), any(), any());
     }
 
     @Test
@@ -194,7 +196,7 @@ class SchedulerLoopTest {
 
         schedulerLoop.executeCycle();
 
-        verify(partitionCursor, never()).advanceWatermark(anyInt(), any());
+        verify(partitionCursor, never()).advanceWatermark(anyInt(), any(), any());
     }
 
     private DueStep buildDueStep() {
