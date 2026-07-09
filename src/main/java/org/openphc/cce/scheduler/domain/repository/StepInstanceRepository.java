@@ -23,7 +23,6 @@ public interface StepInstanceRepository extends JpaRepository<StepInstance, UUID
                 OR (s.state = 'OVERDUE' AND s.missed_date <= :now
                     AND (s.missed_date > :watermark OR (s.missed_date = :watermark AND s.id > :watermarkId)))
             )
-            AND MOD(ABS(('x' || SUBSTR(MD5(s.protocol_instance_id::text), 1, 8))::bit(32)::int), :totalPartitions) = :partitionIndex
             ORDER BY (CASE s.state
                 WHEN 'PENDING' THEN s.due_date
                 WHEN 'DUE' THEN s.overdue_date
@@ -35,8 +34,6 @@ public interface StepInstanceRepository extends JpaRepository<StepInstance, UUID
             @Param("now") OffsetDateTime now,
             @Param("watermark") OffsetDateTime watermark,
             @Param("watermarkId") UUID watermarkId,
-            @Param("partitionIndex") int partitionIndex,
-            @Param("totalPartitions") int totalPartitions,
             @Param("batchSize") int batchSize
     );
 }

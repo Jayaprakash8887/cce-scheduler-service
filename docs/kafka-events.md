@@ -16,7 +16,7 @@ The Scheduler Service produces to exactly **one** Kafka topic. It does not consu
 | **Value Format** | JSON (`SchedulerTriggerMessage`) |
 | **Partitions** | 25 (matches Compliance Service topic configuration) |
 | **Replication Factor** | 3 (production) / 1 (local dev) |
-| **Guarantees** | At-least-once delivery (idempotent producer, synchronous publish). Partition-safe — all transitions for a `protocolInstanceId` are always produced by the same Scheduler instance (deterministic hash partitioning). |
+| **Guarantees** | At-least-once delivery (idempotent producer, async batched publish). All triggers are produced by the single active leader, and keying by `protocolInstanceId` keeps a protocol's transitions ordered within a topic partition. |
 
 ---
 
@@ -43,7 +43,7 @@ spring:
 | `enable.idempotence` | `true` | Exactly-once semantics within a partition |
 | `max.in.flight.requests.per.connection` | `5` | Max allowed with idempotent producer |
 
-**Publishing mode:** Synchronous — the Scheduler waits for broker acknowledgment before proceeding to the next step in the batch. This ensures ordering and simplifies error handling.
+**Publishing mode:** Asynchronous batched — within a scan cycle the Scheduler **fires all sends without blocking** (so the producer pipelines and batches them), then **awaits the whole batch** and tallies per-message success/failure. This lifts throughput for bursty cycles versus a send-then-block-per-message loop, while `enable.idempotence` + `acks=all` preserve ordering and de-duplicate producer retries within a partition.
 
 ---
 
@@ -140,11 +140,11 @@ The Compliance Service consumes from `cce.scheduler.triggers` with these expecta
 
 | Guarantee | Mechanism |
 |---|---|
-| **At-least-once delivery** | Synchronous publish + idempotent producer |
+| **At-least-once delivery** | Async batched publish (batch awaited each cycle) + idempotent producer |
 | **Idempotency (producer)** | `enable.idempotence=true` prevents duplicate publishes on retry |
 | **Idempotency (consumer)** | Compliance Service checks current step state before applying transition |
-| **No per-cycle re-emission** | A per-partition scan watermark (`scheduler_partition_cursor`) advances past crossings that were published successfully, so a crossing is normally emitted **once** rather than re-published every scan cycle while a step's state is frozen. See the data dictionary for accepted gaps. |
-| **Ordering (per partition)** | Key = `protocolInstanceId` ensures all transitions for a protocol are ordered. The Scheduler’s hash-partitioning by `protocol_instance_id` guarantees a given protocol is always scanned by the same Scheduler instance, preserving transition ordering even with multiple concurrent instances. |
+| **No per-cycle re-emission** | The scan watermark (`scheduler_partition_cursor`) advances past crossings that were published successfully, so a crossing is normally emitted **once** rather than re-published every scan cycle while a step's state is frozen. See the data dictionary for accepted gaps. |
+| **Ordering (per partition)** | Key = `protocolInstanceId` ensures all transitions for a protocol land on the same topic partition and stay ordered. A single active leader produces all triggers, so there is no cross-instance interleaving. |
 | **Durability** | `acks=all` waits for all ISR replicas |
 
 ---

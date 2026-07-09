@@ -1,108 +1,73 @@
 # CCE Scheduler Service — Flow Diagrams
 
-All diagrams use Mermaid syntax for rendering in GitHub/IDE preview.
+Visual reference for the scheduler's runtime behavior: the main scan-publish loop, single-leader election, due-step scanning, state transitions, and failover.
 
 ---
 
 ## 1. Scheduler Main Loop
 
-The core scan-publish cycle that runs on every `fixedDelay` interval. Each instance scans **all partitions it owns** (may be multiple).
+The core scan-publish cycle that runs on every `fixedDelay` interval. Only the instance holding the leader lock scans; the rest stand by.
 
 ```mermaid
 sequenceDiagram
-    participant SL as SchedulerLoop<br/>(@Scheduled)
+    participant SL as SchedulerLoop
     participant Leader as LeaderElection
     participant Scanner as DueStepScanner
     participant DB as PostgreSQL
     participant Publisher as TransitionPublisher
-    participant Kafka as Apache Kafka
-    participant Metrics as Micrometer
+    participant Kafka as Kafka
+    participant Metrics as Metrics
 
-    loop fixedDelay (5s default)
-        SL->>Leader: getOwnedPartitions()
-        alt No partitions owned (standby)
-            SL->>Metrics: Record cycle (idle)
-            Note over SL: Skip - standby mode
-        else ownedPartitions = [P1, P2, ...]
-            loop For each owned partition P
-                SL->>Scanner: scan(P, totalPartitions)
-                Scanner->>DB: SELECT watermark, watermark_id FROM scheduler_partition_cursor<br/>WHERE partition_index=P (epoch + min-UUID if none)
-                Scanner->>DB: SELECT step_instance<br/>WHERE state/date thresholds met<br/>AND (threshold, id) &gt; (watermark, watermark_id)<br/>AND MOD(ABS(HASHTEXT(protocol_instance_id)), N) = P<br/>ORDER BY threshold ASC, id ASC<br/>LIMIT batchSize
-                DB-->>Scanner: List of StepInstance
-                Scanner-->>SL: List of DueStep
+    loop Every fixedDelay (default 5s)
+        SL->>Leader: isLeader()?
+        alt Not leader
+            Note over SL: Standby — skip cycle
+        else Leader
+            SL->>Scanner: scan()
+            Scanner->>DB: SELECT watermark, watermark_id FROM scheduler_partition_cursor (epoch + min-UUID if none)
+            Scanner->>DB: SELECT step_instance<br/>WHERE state/date thresholds met<br/>AND (threshold, id) &gt; (watermark, watermark_id)<br/>ORDER BY threshold ASC, id ASC<br/>LIMIT batchSize
+            DB-->>Scanner: List of StepInstance
+            Scanner-->>SL: List of DueStep
 
-                alt Steps found
-                    loop For each DueStep
-                        SL->>Publisher: publish(dueStep)
-                        Publisher->>Kafka: Send SchedulerTriggerMessage<br/>key=protocolInstanceId
-                        Kafka-->>Publisher: Ack
-                        Publisher->>Metrics: publish.success++ (partition=P)
-                    end
-                    opt All published successfully
-                        SL->>DB: UPSERT scheduler_partition_cursor<br/>SET (watermark, watermark_id) = last emitted (threshold, id)<br/>WHERE new &gt; old (monotonic), partition_index=P
-                    end
+            alt Steps found
+                SL->>Publisher: publishAll(dueSteps)
+                Publisher->>Kafka: Fire all sends async (key=protocolInstanceId)
+                Kafka-->>Publisher: Acks (awaited as a batch)
+                Publisher->>Metrics: publish.success / publish.failure
+                opt All published successfully
+                    SL->>DB: UPSERT scheduler_partition_cursor<br/>SET (watermark, watermark_id) = last emitted (threshold, id)<br/>WHERE new &gt; old (monotonic)
                 end
-
-                SL->>Leader: updateHeartbeat(P)
-                Leader->>DB: UPDATE scheduler_lease<br/>SET last_heartbeat=now()<br/>WHERE partition_index=P
-                SL->>Metrics: Record cycle (partition=P)
             end
+
+            SL->>Metrics: Record cycle + scan duration
         end
     end
 ```
 
 ---
 
-## 2. Fair-Share Partitioned Leader Election Lifecycle
+## 2. Single-Leader Election Lifecycle
+
+One PostgreSQL advisory lock decides the single active leader; all other instances stand by and retry.
 
 ```mermaid
 flowchart TD
-    A["Service Startup"] --> B["Ensure dedicated<br/>JDBC connection"]
-    B --> HB["Upsert this node's heartbeat<br/>into scheduler_node"]
-    HB --> AC["activeNodes = fresh scheduler_node rows<br/>(prune stale rows)"]
-    AC --> FS["fairShare = ceil(totalPartitions / activeNodes)"]
-    FS --> REL{"held > fairShare?"}
-    REL -->|"Yes"| RELX["pg_advisory_unlock surplus<br/>(highest-indexed first)"]
-    RELX --> D
-    REL -->|"No"| D{"held < fairShare<br/>and free partition i?"}
-    D --> D1["sleep(random(0, lockAcquireDelayMs))<br/>// stagger simultaneous starts"]
-    D1 --> D2{"pg_try_advisory_lock<br/>(lockKey + i)?"}
-    D2 -->|"Acquired lock i"| E["Add i to ownedPartitions<br/>Update scheduler_lease row i"]
-    E --> D
-    D2 -->|"Lock held by other"| D
-    D -->|"At fair share / none free"| F{"ownedPartitions<br/>empty?"}
-    F -->|"Yes"| G["standby mode<br/>(still heartbeats to scheduler_node)"]
-    F -->|"No"| H["leader = true<br/>owns partitions list"]
+    A["tryAcquireLeadership()<br/>(every leaderRetryInterval)"] --> B["Ensure dedicated JDBC connection<br/>(fresh connection holds no lock)"]
+    B --> C{"Already hold the lock<br/>on this connection?"}
+    C -->|"Yes"| LEAD
+    C -->|"No"| D["pg_try_advisory_lock(advisoryLockKey)"]
+    D --> E{"Acquired?"}
+    E -->|"Yes"| LEAD["LEADER:<br/>update scheduler_lease heartbeat + lease expiry"]
+    E -->|"No"| STBY["STANDBY:<br/>lock held elsewhere — do nothing this cycle"]
 
-    H --> I["Start scan loop<br/>(iterates all owned partitions)"]
+    LEAD --> W["Wait leaderRetryInterval → repeat"]
+    STBY --> W
 
-    G --> J["Wait leaderRetryInterval"]
-    J --> HB
-
-    I --> K{"Scan cycle<br/>completed for<br/>all owned partitions?"}
-    K -->|"Yes"| L["Update heartbeat<br/>for each owned partition"]
-    L --> M["Wait fixedDelay"]
-    M --> HB
-
-    subgraph Shutdown
-        N["@PreDestroy"] --> O["Release held advisory locks"]
-        O --> O2["Deregister from scheduler_node"]
-        O2 --> P["Close dedicated connection"]
-    end
-
-    subgraph Failover
-        Q["Instance dies"] --> R["PG connection drops"]
-        R --> S["ALL advisory locks released;<br/>scheduler_node row goes stale & pruned"]
-        S --> T["Survivors recompute larger fairShare,<br/>acquire orphaned locks on next retry"]
-        T --> E
-    end
-
-    style H fill:#27AE60,color:white
-    style G fill:#E67E22,color:white
-    style RELX fill:#2980B9,color:white
-    style S fill:#E74C3C,color:white
-    style T fill:#27AE60,color:white
+    style LEAD fill:#27AE60,color:white
+    style STBY fill:#7F8C8D,color:white
 ```
+
+**Failover:** when the leader dies, its dedicated connection drops and PostgreSQL releases the advisory lock. A standby's next `pg_try_advisory_lock` succeeds (≤ `leaderRetryInterval`), promoting it. A `holdsLock` flag is reset whenever the connection is (re)established or dropped, so a silently-dropped connection can never leave a stale "still leader" belief.
 
 ---
 
@@ -110,9 +75,9 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["DueStepScanner.scan(P, N)"] --> A2["Read cursor (W, Wid) for P<br/>(epoch + min-UUID if no row)"]
-    A2 --> B["Query PostgreSQL"]
-    B --> C["SELECT steps WHERE<br/>threshold ≤ now AND (threshold, id) > (W, Wid)<br/>evaluated per state (PENDING→dueDate,<br/>DUE→overdueDate, OVERDUE→missedDate)<br/>AND MOD(ABS(HASHTEXT(protocol_instance_id::text)), N) = P<br/>ORDER BY threshold ASC, id ASC<br/>LIMIT batchSize"]
+    A["DueStepScanner.scan()"] --> A2["Read cursor (W, Wid)<br/>(epoch + min-UUID if no row)"]
+    A2 --> B["Query PostgreSQL (whole table)"]
+    B --> C["SELECT steps WHERE<br/>threshold ≤ now AND (threshold, id) > (W, Wid)<br/>evaluated per state (PENDING→dueDate,<br/>DUE→overdueDate, OVERDUE→missedDate)<br/>ORDER BY threshold ASC, id ASC<br/>LIMIT batchSize"]
     C --> D{"Results empty?"}
     D -->|"Yes"| E["Return empty list"]
     D -->|"No"| F["For each StepInstance"]
@@ -134,37 +99,20 @@ flowchart TD
     style M fill:#27AE60,color:white
 ```
 
-> **P** = this instance’s `partitionIndex`, **N** = `totalPartitions`, **(W, Wid)** = partition P's keyset scan cursor `(threshold, step id)`. When N=1, the `MOD(...)` clause is always 0 = P, effectively a no-op (full table scan). The cursor is the exclusive lower bound in `(threshold, id)` order: the scan skips crossings already emitted in a prior cycle, and the UUID v7 `id` tie-breaker lets a same-timestamp cohort larger than `batch-size` drain across cycles (in creation order) rather than being truncated. `SchedulerLoop` advances the cursor to the last emitted `(threshold, id)` after a fully successful publish (`watermark-enabled=true`, the default). Set `watermark-enabled=false` to disable and scan all due rows every cycle.
+> **(W, Wid)** = the keyset scan cursor `(threshold, step id)`. It is the exclusive lower bound in `(threshold, id)` order: the scan skips crossings already emitted in a prior cycle, and the UUID v7 `id` tie-breaker lets a same-timestamp cohort larger than `batch-size` drain across cycles (in creation order) rather than being truncated. `SchedulerLoop` advances the cursor to the last emitted `(threshold, id)` after a fully successful publish (`watermark-enabled=true`, the default). Set `watermark-enabled=false` to disable and scan all due rows every cycle.
+
 ### Indexing & Query Optimization Notes
 
-**Indexes on `step_instance` (owned by Compliance Service):**
-
-The Compliance Service defines the following indexes that benefit the Scheduler's polling query:
-
-| Index | Columns | Purpose |
-|-------|---------|--------|
-| `idx_step_instance_state` | `state` WHERE `state IN ('PENDING', 'DUE', 'OVERDUE')` | Filters to only non-terminal (actionable) steps |
-| `idx_step_instance_due_date` | `due_date` WHERE `state IN ('PENDING', 'DUE', 'OVERDUE')` | Scheduler time-based transitions — enables efficient range scans for threshold-crossing detection |
-
-These **partial indexes** ensure PostgreSQL narrows down the candidate set to non-terminal steps with time thresholds *before* applying the partition filter.
-
-**Optimization of `MOD(ABS(HASHTEXT(protocol_instance_id::text)), N) = P`:**
-
-The hash-modulo partition filter is a non-indexable expression — it cannot leverage a B-tree index directly. However, the query is structured so that the **WHERE clause's time-based predicates** (indexed above) reduce the working set first, and the `MOD(...)` filter is applied only to the resulting rows. In practice:
-
-1. Partial indexes reduce the scan to only rows in the matching status + time window.
-2. The `MOD(HASHTEXT(...))` filter is then applied as a cheap CPU operation on the reduced set.
-3. `LIMIT batchSize` caps the final output.
-
-This keeps query cost low even without indexing the hash expression itself. If profiling shows the `MOD(...)` filter discarding too many rows (i.e., N is large and each partition gets 1/N of the pre-filtered set), consider a **functional index**:
+`step_instance` is owned by the Compliance Service; the Scheduler reads it. To keep the watermark-bounded scan efficient as the table grows, the ideal supporting indexes are **partial indexes on each threshold column with `id` as a trailing column**, so the `(threshold, id)` keyset seek is fully index-ordered:
 
 ```sql
-CREATE INDEX idx_step_instance_partition ON step_instance (
-    MOD(ABS(HASHTEXT(protocol_instance_id::text)), <N>)
-) WHERE status IN ('PENDING', 'DUE', 'OVERDUE');
+CREATE INDEX idx_step_instance_pending_due   ON step_instance (due_date, id)     WHERE state = 'PENDING';
+CREATE INDEX idx_step_instance_due_overdue   ON step_instance (overdue_date, id) WHERE state = 'DUE';
+CREATE INDEX idx_step_instance_overdue_missed ON step_instance (missed_date, id) WHERE state = 'OVERDUE';
 ```
 
-> **Note:** A functional index is tied to a specific value of N. If `total-partitions` changes, the index must be recreated. For most deployments (N ≤ 8), the filtered-scan approach above is sufficient without a functional index.
+These belong in Compliance-owned migrations. UUID v7 ids are sequential, so such indexes stay compact (append-mostly inserts). Without them the query still works — it just sorts the filtered set.
+
 ---
 
 ## 4. State Transition Determination
@@ -194,39 +142,35 @@ graph LR
     style S fill:#95A5A6,color:white
 ```
 
+The Scheduler only ever *requests* the time-based transitions (left). The Compliance Service is the sole writer of `step_instance.state` and decides the terminal outcome (MISSED vs SKIPPED by `requiredBehavior`, or COMPLETED on an event match).
+
 ---
 
-## 5. Failover Scenario (Fair-Share Partition Redistribution)
+## 5. Failover Scenario
 
 ```mermaid
 sequenceDiagram
-    participant L1 as Instance A<br/>(Partitions 0,1)
-    participant L2 as Instance B<br/>(Partition 2)
+    participant L1 as Instance A (leader)
+    participant L2 as Instance B (standby)
     participant PG as PostgreSQL
     participant Kafka as Kafka
 
-    Note over L1,L2: Normal operation — 3 partitions across 2 instances
-    L1->>PG: Hold advisory locks 100001, 100002
-    L2->>PG: Hold advisory lock 100003
-    L1->>PG: Scan partition 0, then partition 1
-    L2->>PG: Scan partition 2
-    L1->>Kafka: Publish transitions (partitions 0,1)
-    L2->>Kafka: Publish transitions (partition 2)
+    Note over L1,L2: Normal operation — A is leader, B stands by
+    L1->>PG: Holds advisory lock (advisoryLockKey)
+    L1->>PG: Scan whole table (watermark-bounded)
+    L1->>Kafka: Publish transitions (async batched)
+    L2->>PG: pg_try_advisory_lock → false (held by A) → standby
 
     Note over L1: Instance A crashes
     L1--xPG: Connection drops
-    Note over PG: Advisory locks 100001 + 100002 auto-released;<br/>A's scheduler_node row goes stale & is pruned
+    Note over PG: Advisory lock auto-released
 
-    Note over L2: activeNodes drops to 1 → fairShare = 3
-    L2->>PG: pg_try_advisory_lock(100001)
+    Note over L2: Next retry (≤ leaderRetryInterval)
+    L2->>PG: pg_try_advisory_lock(advisoryLockKey)
     PG-->>L2: Lock acquired!
-    L2->>PG: pg_try_advisory_lock(100002)
-    PG-->>L2: Lock acquired!
-    Note over L2: Now owns ALL 3 partitions
+    Note over L2: B is now the leader
 
-    L2->>PG: Scan partition 0, 1, 2
-    L2->>Kafka: Publish transitions (all partitions)
-
-    Note over L2: Single instance handles full table
-    Note over Kafka: Compliance Service handles<br/>any duplicate messages<br/>idempotently
+    L2->>PG: Scan whole table
+    L2->>Kafka: Publish transitions
+    Note over Kafka: Compliance Service handles<br/>any duplicate messages idempotently
 ```

@@ -31,6 +31,9 @@ public class PartitionCursorService {
     public static final UUID BEGINNING_ID =
             new UUID(0L, 0L);
 
+    /** The service runs a single logical partition; the cursor always uses this index. */
+    public static final int SINGLE_PARTITION = 0;
+
     /** Composite scan cursor: emit rows sorting strictly after ({@code timestamp}, {@code id}). */
     public record Watermark(OffsetDateTime timestamp, UUID id) {}
 

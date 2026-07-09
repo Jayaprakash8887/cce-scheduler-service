@@ -8,7 +8,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.openphc.cce.scheduler.config.SchedulerProperties;
 import org.openphc.cce.scheduler.domain.repository.SchedulerLeaseRepository;
-import org.openphc.cce.scheduler.domain.repository.SchedulerNodeRepository;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -22,7 +21,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -31,9 +30,6 @@ class LeaderElectionTest {
 
     @Mock
     private SchedulerLeaseRepository leaseRepository;
-
-    @Mock
-    private SchedulerNodeRepository nodeRepository;
 
     @Mock
     private DataSource dataSource;
@@ -47,161 +43,49 @@ class LeaderElectionTest {
     @BeforeEach
     void setUp() {
         properties = new SchedulerProperties();
-        properties.setTotalPartitions(1);
-        properties.setLockAcquireDelayMs(0);
         properties.setLeaseDurationSeconds(30);
         properties.setAdvisoryLockKey(100001);
         meterRegistry = new SimpleMeterRegistry();
     }
 
+    private LeaderElection newElection() {
+        return new LeaderElection(properties, leaseRepository, dataSource, meterRegistry);
+    }
+
     @Test
-    void initialState_noPartitionsOwned() {
-        LeaderElection election = new LeaderElection(
-                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
+    void initialState_notLeader() {
+        LeaderElection election = newElection();
 
         assertThat(election.isLeader()).isFalse();
-        assertThat(election.getOwnedPartitions()).isEmpty();
         assertThat(election.getLeaderId()).isNotBlank();
     }
 
     @Test
-    void totalPartitions_reflectsConfig() {
-        properties.setTotalPartitions(4);
-        LeaderElection election = new LeaderElection(
-                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
-
-        assertThat(election.getTotalPartitions()).isEqualTo(4);
-    }
-
-    @Test
     void leaderId_isUniquePerInstance() {
-        LeaderElection election1 = new LeaderElection(
-                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
-        LeaderElection election2 = new LeaderElection(
-                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
-
-        assertThat(election1.getLeaderId()).isNotEqualTo(election2.getLeaderId());
+        assertThat(newElection().getLeaderId()).isNotEqualTo(newElection().getLeaderId());
     }
 
     @Test
-    void shutdown_clearsOwnedPartitions() {
-        LeaderElection election = new LeaderElection(
-                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
+    void shutdown_clearsLeadership() {
+        LeaderElection election = newElection();
 
         election.shutdown();
 
-        assertThat(election.getOwnedPartitions()).isEmpty();
         assertThat(election.isLeader()).isFalse();
     }
 
     @Test
-    void tryAcquirePartitions_withFailedConnection_setsEmptyPartitions() throws SQLException {
+    void tryAcquireLeadership_withFailedConnection_notLeader() throws SQLException {
         when(dataSource.getConnection()).thenThrow(new SQLException("Connection refused"));
 
-        LeaderElection election = new LeaderElection(
-                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
-
-        election.tryAcquirePartitions();
+        LeaderElection election = newElection();
+        election.tryAcquireLeadership();
 
         assertThat(election.isLeader()).isFalse();
-        assertThat(election.getOwnedPartitions()).isEmpty();
     }
 
     @Test
-    void sleepJitter_withZeroDelay_doesNotBlock() {
-        LeaderElection election = new LeaderElection(
-                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
-
-        long start = System.currentTimeMillis();
-        election.sleepJitter(0);
-        long elapsed = System.currentTimeMillis() - start;
-
-        assertThat(elapsed).isLessThan(50);
-    }
-
-    @Test
-    void sleepJitter_withPositiveDelay_sleepsWithinBound() {
-        LeaderElection election = new LeaderElection(
-                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
-
-        long start = System.currentTimeMillis();
-        election.sleepJitter(100);
-        long elapsed = System.currentTimeMillis() - start;
-
-        assertThat(elapsed).isLessThan(150);
-    }
-
-    @Test
-    void leaderStatusGauge_registeredPerPartition() {
-        properties.setTotalPartitions(3);
-        new LeaderElection(properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
-
-        assertThat(meterRegistry.find("cce.scheduler.leader.status")
-                .tag("partition", "0").gauge()).isNotNull();
-        assertThat(meterRegistry.find("cce.scheduler.leader.status")
-                .tag("partition", "1").gauge()).isNotNull();
-        assertThat(meterRegistry.find("cce.scheduler.leader.status")
-                .tag("partition", "2").gauge()).isNotNull();
-    }
-
-    @Test
-    void fairShare_singleNode_ownsAllPartitions() {
-        assertThat(LeaderElection.fairShare(3, 1)).isEqualTo(3);
-    }
-
-    @Test
-    void fairShare_evenSplit_isOnePerNode() {
-        // 3 partitions across 3 pods -> 1 each (the distribution this fixes).
-        assertThat(LeaderElection.fairShare(3, 3)).isEqualTo(1);
-    }
-
-    @Test
-    void fairShare_unevenSplit_roundsUpForFullCoverage() {
-        // 4 partitions across 3 pods -> ceil(1.33)=2, guaranteeing no orphaned partition.
-        assertThat(LeaderElection.fairShare(4, 3)).isEqualTo(2);
-    }
-
-    @Test
-    void fairShare_moreNodesThanPartitions_capsAtOne() {
-        assertThat(LeaderElection.fairShare(3, 5)).isEqualTo(1);
-    }
-
-    @Test
-    void fairShare_treatsZeroNodesAsSolo() {
-        // Defensive: a count below 1 cannot starve the only live pod.
-        assertThat(LeaderElection.fairShare(3, 0)).isEqualTo(3);
-    }
-
-    @Test
-    void tryAcquirePartitions_duringStartupGrace_defersAcquisitionButHeartbeats() throws SQLException {
-        properties.setTotalPartitions(3);
-        // 60s window — still in grace immediately after construction.
-        properties.setStartupAcquireDelayMs(60_000);
-
-        when(dataSource.getConnection()).thenReturn(connection);
-        when(nodeRepository.findById(anyString())).thenReturn(Optional.empty());
-        when(nodeRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
-        when(nodeRepository.countByLastHeartbeatAfter(any())).thenReturn(1L);
-
-        LeaderElection election = new LeaderElection(
-                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
-
-        election.tryAcquirePartitions();
-
-        // Acquisition deferred while in grace...
-        assertThat(election.getOwnedPartitions()).isEmpty();
-        assertThat(election.isLeader()).isFalse();
-        // ...but the node registered its heartbeat so peers count it toward fair share...
-        verify(nodeRepository).save(any());
-        // ...and no advisory lock was attempted.
-        verify(connection, never()).prepareStatement(anyString());
-    }
-
-    @Test
-    void tryAcquirePartitions_startupGraceIgnoredForSinglePartition() throws SQLException {
-        properties.setTotalPartitions(1);
-        properties.setStartupAcquireDelayMs(60_000); // ignored when there is nothing to distribute
-
+    void tryAcquireLeadership_lockAcquired_becomesLeader() throws SQLException {
         PreparedStatement stmt = mock(PreparedStatement.class);
         ResultSet rs = mock(ResultSet.class);
         when(dataSource.getConnection()).thenReturn(connection);
@@ -211,24 +95,32 @@ class LeaderElectionTest {
         when(rs.getBoolean(1)).thenReturn(true);
         when(leaseRepository.findByPartitionIndex(anyInt())).thenReturn(Optional.empty());
         when(leaseRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
-        when(nodeRepository.findById(anyString())).thenReturn(Optional.empty());
-        when(nodeRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
-        when(nodeRepository.countByLastHeartbeatAfter(any())).thenReturn(1L);
 
-        LeaderElection election = new LeaderElection(
-                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
+        LeaderElection election = newElection();
+        election.tryAcquireLeadership();
 
-        election.tryAcquirePartitions();
-
-        // Single partition: grace is skipped, the sole partition is owned immediately.
-        assertThat(election.getOwnedPartitions()).containsExactly(0);
+        assertThat(election.isLeader()).isTrue();
+        verify(leaseRepository).save(any());
     }
 
     @Test
-    void tryAcquirePartitions_rebalancesToFairShareAsClusterGrows() throws SQLException {
-        properties.setTotalPartitions(3);
-        properties.setLockAcquireDelayMs(0);
+    void tryAcquireLeadership_lockUnavailable_staysStandby() throws SQLException {
+        PreparedStatement stmt = mock(PreparedStatement.class);
+        ResultSet rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(connection);
+        when(connection.prepareStatement(anyString())).thenReturn(stmt);
+        when(stmt.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getBoolean(1)).thenReturn(false); // lock held elsewhere
 
+        LeaderElection election = newElection();
+        election.tryAcquireLeadership();
+
+        assertThat(election.isLeader()).isFalse();
+    }
+
+    @Test
+    void tryAcquireLeadership_alreadyLeader_doesNotReacquireLock() throws SQLException {
         PreparedStatement stmt = mock(PreparedStatement.class);
         ResultSet rs = mock(ResultSet.class);
         when(dataSource.getConnection()).thenReturn(connection);
@@ -236,23 +128,23 @@ class LeaderElectionTest {
         when(connection.prepareStatement(anyString())).thenReturn(stmt);
         when(stmt.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(true);
-        when(rs.getBoolean(1)).thenReturn(true); // every advisory lock is grabbable
+        when(rs.getBoolean(1)).thenReturn(true);
         when(leaseRepository.findByPartitionIndex(anyInt())).thenReturn(Optional.empty());
         when(leaseRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
-        when(nodeRepository.findById(anyString())).thenReturn(Optional.empty());
-        when(nodeRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
-        // Cluster looks like 1 node on the first cycle, then 3 once peers have joined.
-        when(nodeRepository.countByLastHeartbeatAfter(any())).thenReturn(1L, 3L);
 
-        LeaderElection election = new LeaderElection(
-                properties, leaseRepository, nodeRepository, dataSource, meterRegistry);
+        LeaderElection election = newElection();
+        election.tryAcquireLeadership();
+        election.tryAcquireLeadership(); // second cycle: already holds the lock
 
-        // Round 1: booted alone -> fair share is all 3 partitions.
-        election.tryAcquirePartitions();
-        assertThat(election.getOwnedPartitions()).containsExactly(0, 1, 2);
+        assertThat(election.isLeader()).isTrue();
+        // Lock acquired exactly once; the second cycle skips re-acquisition.
+        verify(connection, times(1)).prepareStatement("SELECT pg_try_advisory_lock(?)");
+    }
 
-        // Round 2: two peers joined -> fair share drops to 1, surplus released.
-        election.tryAcquirePartitions();
-        assertThat(election.getOwnedPartitions()).hasSize(1);
+    @Test
+    void leaderStatusGauge_registered() {
+        newElection();
+
+        assertThat(meterRegistry.find("cce.scheduler.leader.status").gauge()).isNotNull();
     }
 }

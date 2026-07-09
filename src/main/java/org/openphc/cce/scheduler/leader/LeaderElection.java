@@ -1,14 +1,11 @@
 package org.openphc.cce.scheduler.leader;
 
 import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.Tags;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.openphc.cce.scheduler.config.SchedulerProperties;
 import org.openphc.cce.scheduler.domain.model.SchedulerLease;
-import org.openphc.cce.scheduler.domain.model.SchedulerNode;
 import org.openphc.cce.scheduler.domain.repository.SchedulerLeaseRepository;
-import org.openphc.cce.scheduler.domain.repository.SchedulerNodeRepository;
 import org.slf4j.MDC;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -18,237 +15,133 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Set;
-import java.util.TreeSet;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantLock;
 
+/**
+ * Single-leader election via one PostgreSQL session-level advisory lock.
+ *
+ * <p>Exactly one instance can hold the lock at a time, so only that instance scans
+ * and publishes; every other instance stays on standby. The lock is held for the life
+ * of a dedicated JDBC connection (outside the HikariCP pool), so it auto-releases if
+ * the instance crashes or its connection drops — a surviving standby then acquires it
+ * on its next retry. This guarantees no two instances process records simultaneously
+ * with zero external coordination (no ZooKeeper/etcd).
+ */
 @Component
 @Slf4j
 public class LeaderElection {
 
+    /** Single logical partition — the lease row / metric this instance heartbeats. */
+    private static final int SINGLE_PARTITION = 0;
+
     private final SchedulerProperties properties;
     private final SchedulerLeaseRepository leaseRepository;
-    private final SchedulerNodeRepository nodeRepository;
     private final DataSource dataSource;
-    private final MeterRegistry meterRegistry;
     private final String leaderId;
 
     private volatile Connection dedicatedConnection;
-    private volatile LeaderState state = new LeaderState(Collections.emptyList(), null, null);
+    /** Whether we hold the advisory lock on the CURRENT dedicated connection.
+     *  Reset whenever the connection is (re)established or dropped, so a silently
+     *  dropped connection can never leave us believing we are still leader. */
+    private boolean holdsLock = false;
+    private volatile LeaderState state = new LeaderState(false, null, null);
     private final ReentrantLock connectionLock = new ReentrantLock();
 
-    /** When this instance booted — start of the optional startup acquisition grace period. */
-    private final OffsetDateTime bootTime = OffsetDateTime.now(ZoneOffset.UTC);
-
-    /** Partitions whose advisory lock this pod currently holds. Guarded by {@link #connectionLock}. */
-    private final Set<Integer> heldPartitions = new TreeSet<>();
-
-    public record LeaderState(List<Integer> ownedPartitions, OffsetDateTime lastHeartbeat, OffsetDateTime leaseExpiresAt) {}
+    public record LeaderState(boolean leader, OffsetDateTime lastHeartbeat, OffsetDateTime leaseExpiresAt) {}
 
     public LeaderElection(
             SchedulerProperties properties,
             SchedulerLeaseRepository leaseRepository,
-            SchedulerNodeRepository nodeRepository,
             DataSource dataSource,
             MeterRegistry meterRegistry) {
         this.properties = properties;
         this.leaseRepository = leaseRepository;
-        this.nodeRepository = nodeRepository;
         this.dataSource = dataSource;
-        this.meterRegistry = meterRegistry;
         this.leaderId = UUID.randomUUID().toString();
 
-        // Register leader.status gauge per partition
-        for (int i = 0; i < properties.getTotalPartitions(); i++) {
-            final int partition = i;
-            meterRegistry.gauge("cce.scheduler.leader.status",
-                    Tags.of("partition", String.valueOf(partition)),
-                    this,
-                    leader -> leader.getOwnedPartitions().contains(partition) ? 1.0 : 0.0);
-        }
+        // leader.status gauge: 1 = leader, 0 = standby.
+        meterRegistry.gauge("cce.scheduler.leader.status", this, l -> l.isLeader() ? 1.0 : 0.0);
 
-        log.info("LeaderElection initialized — leaderId={}, totalPartitions={}, lockAcquireDelayMs={}",
-                leaderId, properties.getTotalPartitions(), properties.getLockAcquireDelayMs());
+        log.info("LeaderElection initialized — leaderId={}", leaderId);
     }
 
     @Scheduled(fixedDelayString = "${cce.scheduler.leader-retry-interval}")
-    public void tryAcquirePartitions() {
+    public void tryAcquireLeadership() {
         connectionLock.lock();
         try {
             ensureDedicatedConnection();
-            int totalPartitions = properties.getTotalPartitions();
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
-            // Make this pod visible to peers (standbys included), then derive how
-            // many partitions we're entitled to given the current cluster size.
-            registerNodeHeartbeat(now, heldPartitions.size());
-            int activeNodes = countActiveNodes(now);
-            int fairShare = fairShare(totalPartitions, activeNodes);
-
-            if (inStartupGrace(now)) {
-                // Heartbeat registered above so peers count us; defer acquisition so
-                // co-starting instances register before anyone grabs a share.
-                log.info("Startup grace active — deferring partition acquisition for {}ms so peers can register",
-                        properties.getStartupAcquireDelayMs());
-            } else {
-                // Shed any surplus we grabbed while alone so newly-joined pods can take it.
-                releaseDownTo(fairShare);
-
-                // Acquire free partitions, but never beyond our fair share.
-                for (int i = 0; i < totalPartitions && heldPartitions.size() < fairShare; i++) {
-                    if (heldPartitions.contains(i)) {
-                        continue;
-                    }
-                    if (tryAcquireLock(i)) {
-                        heldPartitions.add(i);
-                    }
-                    // Micro-delay between consecutive lock attempts for fair distribution
-                    if (i < totalPartitions - 1 && properties.getLockAcquireDelayMs() > 0) {
-                        sleepJitter(properties.getLockAcquireDelayMs());
-                    }
-                }
+            // Acquire only if we don't already hold it on this connection (session-level
+            // advisory locks persist for the connection's life, so no re-acquire needed).
+            if (!holdsLock) {
+                holdsLock = tryAcquireLock();
             }
+            boolean leader = holdsLock;
 
-            List<Integer> acquired = new ArrayList<>(heldPartitions);
-            List<Integer> ownedList = Collections.unmodifiableList(acquired);
-
-            MDC.put("leaderStatus", acquired.isEmpty() ? "standby" : "leader");
-            MDC.put("ownedPartitions", acquired.toString());
-            MDC.put("totalPartitions", String.valueOf(totalPartitions));
-
+            MDC.put("leaderStatus", leader ? "leader" : "standby");
             try {
-                if (!acquired.isEmpty()) {
+                if (leader) {
                     OffsetDateTime expiresAt = now.plusSeconds(properties.getLeaseDurationSeconds());
-                    this.state = new LeaderState(ownedList, now, expiresAt);
-                    updateHeartbeat(acquired, now, expiresAt);
-                    log.info("Leader {} owns partitions {} (fairShare={}, activeNodes={})",
-                            leaderId, acquired, fairShare, activeNodes);
+                    this.state = new LeaderState(true, now, expiresAt);
+                    updateHeartbeat(now, expiresAt);
+                    log.debug("Leader {} holds the scheduler lock", leaderId);
                 } else {
-                    this.state = new LeaderState(ownedList, state.lastHeartbeat(), state.leaseExpiresAt());
-                    log.debug("Standby {} — no partitions owned (fairShare={}, activeNodes={})",
-                            leaderId, fairShare, activeNodes);
+                    this.state = new LeaderState(false, state.lastHeartbeat(), state.leaseExpiresAt());
+                    log.debug("Standby {} — scheduler lock held elsewhere", leaderId);
                 }
             } finally {
                 MDC.remove("leaderStatus");
-                MDC.remove("ownedPartitions");
-                MDC.remove("totalPartitions");
             }
         } catch (SQLException e) {
             log.warn("Leader election cycle failed — resetting connection", e);
             closeConnection();
-            // Closing the connection drops every advisory lock held on it.
-            heldPartitions.clear();
-            this.state = new LeaderState(Collections.emptyList(), null, null);
+            // Closing the connection drops the advisory lock held on it.
+            this.state = new LeaderState(false, null, null);
         } finally {
             connectionLock.unlock();
         }
     }
 
-    /**
-     * Partitions a single pod is entitled to: {@code ceil(totalPartitions / activeNodes)}.
-     * The ceiling guarantees every partition is claimable (no orphans when the split is
-     * uneven); the trade-off is that with an uneven split the last pod may end up a
-     * standby rather than each pod differing by exactly one.
-     */
-    static int fairShare(int totalPartitions, int activeNodes) {
-        if (activeNodes <= 1) {
-            return totalPartitions;
-        }
-        return (int) Math.ceil((double) totalPartitions / activeNodes);
-    }
-
-    /**
-     * Whether this instance is still in its startup acquisition grace period — a window
-     * after boot during which it heartbeats but defers acquiring locks, letting peers
-     * register first so the initial ownership spreads by fair share. Only meaningful when
-     * there is more than one partition to distribute; disabled when the delay is 0.
-     */
-    private boolean inStartupGrace(OffsetDateTime now) {
-        long delayMs = properties.getStartupAcquireDelayMs();
-        if (delayMs <= 0 || properties.getTotalPartitions() <= 1) {
-            return false;
-        }
-        return now.isBefore(bootTime.plus(Duration.ofMillis(delayMs)));
-    }
-
-    private boolean tryAcquireLock(int partitionIndex) throws SQLException {
-        long lockKey = properties.getAdvisoryLockKey() + partitionIndex;
+    private boolean tryAcquireLock() throws SQLException {
         try (PreparedStatement stmt = dedicatedConnection.prepareStatement(
                 "SELECT pg_try_advisory_lock(?)")) {
-            stmt.setLong(1, lockKey);
+            stmt.setLong(1, properties.getAdvisoryLockKey());
             try (ResultSet rs = stmt.executeQuery()) {
                 return rs.next() && rs.getBoolean(1);
             }
         }
     }
 
-    /** Release highest-indexed held partitions until we hold no more than {@code fairShare}. */
-    private void releaseDownTo(int fairShare) throws SQLException {
-        while (heldPartitions.size() > fairShare) {
-            int victim = Collections.max(heldPartitions);
-            releaseLock(victim);
-            heldPartitions.remove(victim);
-            log.info("Leader {} released partition {} to rebalance (fairShare={})",
-                    leaderId, victim, fairShare);
-        }
-    }
-
-    private void releaseLock(int partitionIndex) throws SQLException {
-        long lockKey = properties.getAdvisoryLockKey() + partitionIndex;
+    private void releaseLock() throws SQLException {
         try (PreparedStatement stmt = dedicatedConnection.prepareStatement(
                 "SELECT pg_advisory_unlock(?)")) {
-            stmt.setLong(1, lockKey);
+            stmt.setLong(1, properties.getAdvisoryLockKey());
             stmt.executeQuery();
         }
     }
 
-    private void registerNodeHeartbeat(OffsetDateTime now, int ownedCount) {
-        SchedulerNode node = nodeRepository.findById(leaderId)
+    private void updateHeartbeat(OffsetDateTime now, OffsetDateTime expiresAt) {
+        SchedulerLease lease = leaseRepository.findByPartitionIndex(SINGLE_PARTITION)
                 .orElseGet(() -> {
-                    SchedulerNode newNode = new SchedulerNode();
-                    newNode.setNodeId(leaderId);
-                    return newNode;
+                    SchedulerLease newLease = new SchedulerLease();
+                    newLease.setPartitionIndex(SINGLE_PARTITION);
+                    return newLease;
                 });
-        node.setLastHeartbeat(now);
-        node.setOwnedCount(ownedCount);
-        nodeRepository.save(node);
-    }
-
-    private int countActiveNodes(OffsetDateTime now) {
-        OffsetDateTime threshold = now.minusSeconds(properties.getLeaseDurationSeconds());
-        nodeRepository.deleteByLastHeartbeatBefore(threshold);
-        long count = nodeRepository.countByLastHeartbeatAfter(threshold);
-        // We registered ourselves above, so the cluster is at least size 1.
-        return (int) Math.max(1L, count);
-    }
-
-    private void updateHeartbeat(List<Integer> partitions, OffsetDateTime now, OffsetDateTime expiresAt) {
-        for (int partitionIndex : partitions) {
-            SchedulerLease lease = leaseRepository.findByPartitionIndex(partitionIndex)
-                    .orElseGet(() -> {
-                        SchedulerLease newLease = new SchedulerLease();
-                        newLease.setPartitionIndex(partitionIndex);
-                        return newLease;
-                    });
-            lease.setLeaderId(leaderId);
-            lease.setLastHeartbeat(now);
-            lease.setLeaseExpiresAt(expiresAt);
-            leaseRepository.save(lease);
-        }
+        lease.setLeaderId(leaderId);
+        lease.setLastHeartbeat(now);
+        lease.setLeaseExpiresAt(expiresAt);
+        leaseRepository.save(lease);
     }
 
     private void ensureDedicatedConnection() throws SQLException {
         if (dedicatedConnection == null || dedicatedConnection.isClosed()) {
             dedicatedConnection = dataSource.getConnection();
             dedicatedConnection.setAutoCommit(true);
+            holdsLock = false; // a fresh connection holds no advisory lock yet
             log.debug("Dedicated advisory-lock connection established");
         }
     }
@@ -262,55 +155,28 @@ public class LeaderElection {
             }
             dedicatedConnection = null;
         }
-    }
-
-    void sleepJitter(int maxDelayMs) {
-        try {
-            int delay = ThreadLocalRandom.current().nextInt(0, maxDelayMs + 1);
-            Thread.sleep(delay);
-        } catch (InterruptedException e) {
-            log.debug("Lock acquisition delay interrupted");
-            Thread.currentThread().interrupt();
-        }
+        holdsLock = false;
     }
 
     @PreDestroy
     public void shutdown() {
         connectionLock.lock();
         try {
-            if (dedicatedConnection != null && !dedicatedConnection.isClosed()) {
-                // Release only the advisory locks this pod actually holds.
-                for (int partitionIndex : heldPartitions) {
-                    try {
-                        releaseLock(partitionIndex);
-                    } catch (SQLException e) {
-                        log.debug("Error releasing lock for partition {}", partitionIndex, e);
-                    }
-                }
-                log.info("Leader {} released advisory locks {}", leaderId, heldPartitions);
+            if (holdsLock && dedicatedConnection != null && !dedicatedConnection.isClosed()) {
+                releaseLock();
+                log.info("Leader {} released the scheduler lock", leaderId);
             }
-            heldPartitions.clear();
             closeConnection();
-            this.state = new LeaderState(Collections.emptyList(), null, null);
+            this.state = new LeaderState(false, null, null);
         } catch (SQLException e) {
             log.warn("Error during leader election shutdown", e);
         } finally {
-            // Deregister so peers stop counting us toward the cluster size immediately.
-            try {
-                nodeRepository.deleteById(leaderId);
-            } catch (RuntimeException e) {
-                log.debug("Error deregistering node {}", leaderId, e);
-            }
             connectionLock.unlock();
         }
     }
 
-    public List<Integer> getOwnedPartitions() {
-        return state.ownedPartitions();
-    }
-
     public boolean isLeader() {
-        return !state.ownedPartitions().isEmpty();
+        return state.leader();
     }
 
     public String getLeaderId() {
@@ -323,9 +189,5 @@ public class LeaderElection {
 
     public OffsetDateTime getLeaseExpiresAt() {
         return state.leaseExpiresAt();
-    }
-
-    public int getTotalPartitions() {
-        return properties.getTotalPartitions();
     }
 }

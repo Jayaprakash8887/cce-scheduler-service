@@ -10,7 +10,6 @@ import org.springframework.boot.actuate.health.Status;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.lenient;
@@ -29,8 +28,6 @@ class LeaderHealthIndicatorTest {
 
     private void stubCommon() {
         lenient().when(leaderElection.getLeaderId()).thenReturn("node-1");
-        lenient().when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0, 1, 2));
-        lenient().when(leaderElection.getTotalPartitions()).thenReturn(3);
     }
 
     @Test
@@ -43,19 +40,18 @@ class LeaderHealthIndicatorTest {
         assertThat(health.getStatus()).isEqualTo(Status.UP);
         assertThat(health.getDetails())
                 .containsEntry("leaderId", "node-1")
-                .containsEntry("isLeader", true)
-                .containsEntry("ownedPartitions", List.of(0, 1, 2))
-                .containsEntry("totalPartitions", 3);
+                .containsEntry("isLeader", true);
     }
 
     @Test
-    void health_whenNotLeader_returnsOutOfService() {
+    void health_whenStandby_returnsUpButNotLeader() {
         stubCommon();
         when(leaderElection.isLeader()).thenReturn(false);
 
         Health health = new LeaderHealthIndicator(leaderElection).health();
 
-        assertThat(health.getStatus()).isEqualTo(Status.OUT_OF_SERVICE);
+        // Standby stays UP (ready for failover); isLeader marks it as not currently leading.
+        assertThat(health.getStatus()).isEqualTo(Status.UP);
         assertThat(health.getDetails()).containsEntry("isLeader", false);
     }
 

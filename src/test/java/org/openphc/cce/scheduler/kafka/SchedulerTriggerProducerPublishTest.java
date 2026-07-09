@@ -55,7 +55,7 @@ class SchedulerTriggerProducerPublishTest {
 
     @Test
     @SuppressWarnings({"unchecked", "rawtypes"})
-    void publish_whenSendSucceeds_returnsTrueAndUsesProtocolInstanceIdAsKey() {
+    void publish_whenSendSucceeds_completesAndUsesProtocolInstanceIdAsKey() {
         UUID protocolInstanceId = UUID.randomUUID();
         UUID stepId = UUID.randomUUID();
 
@@ -66,9 +66,11 @@ class SchedulerTriggerProducerPublishTest {
         when(kafkaTemplate.send(any(ProducerRecord.class)))
                 .thenReturn(CompletableFuture.completedFuture(sendResult));
 
-        boolean ok = producer.publish(protocolInstanceId, message(stepId));
+        CompletableFuture<SendResult<String, Object>> future =
+                producer.publish(protocolInstanceId, message(stepId));
 
-        assertThat(ok).isTrue();
+        assertThat(future).isCompleted();
+        assertThat(future.join()).isSameAs(sendResult);
 
         ArgumentCaptor<ProducerRecord> captor = ArgumentCaptor.forClass(ProducerRecord.class);
         org.mockito.Mockito.verify(kafkaTemplate).send(captor.capture());
@@ -77,25 +79,23 @@ class SchedulerTriggerProducerPublishTest {
     }
 
     @Test
-    void publish_whenSendFails_returnsFalse() {
+    void publish_whenSendFails_returnsFailedFuture() {
         UUID protocolInstanceId = UUID.randomUUID();
         CompletableFuture<SendResult<String, Object>> failed = new CompletableFuture<>();
         failed.completeExceptionally(new RuntimeException("broker down"));
         when(kafkaTemplate.send(any(ProducerRecord.class))).thenReturn(failed);
 
-        boolean ok = producer.publish(protocolInstanceId, message(UUID.randomUUID()));
-
-        assertThat(ok).isFalse();
+        assertThat(producer.publish(protocolInstanceId, message(UUID.randomUUID())))
+                .isCompletedExceptionally();
     }
 
     @Test
-    void publish_whenTemplateThrowsSynchronously_returnsFalse() {
+    void publish_whenTemplateThrowsSynchronously_returnsFailedFuture() {
         UUID protocolInstanceId = UUID.randomUUID();
         when(kafkaTemplate.send(any(ProducerRecord.class)))
                 .thenThrow(new RuntimeException("serialization error"));
 
-        boolean ok = producer.publish(protocolInstanceId, message(UUID.randomUUID()));
-
-        assertThat(ok).isFalse();
+        assertThat(producer.publish(protocolInstanceId, message(UUID.randomUUID())))
+                .isCompletedExceptionally();
     }
 }

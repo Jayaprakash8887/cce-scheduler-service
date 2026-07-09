@@ -23,7 +23,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -50,7 +49,6 @@ class SchedulerLoopTest {
     @BeforeEach
     void setUp() {
         properties = new SchedulerProperties();
-        properties.setTotalPartitions(4);
         meterRegistry = new SimpleMeterRegistry();
         metrics = new ObservabilityConfig(meterRegistry);
         schedulerLoop = new SchedulerLoop(leaderElection, dueStepScanner,
@@ -59,91 +57,61 @@ class SchedulerLoopTest {
 
     @Test
     void executeCycle_standby_skipsProcessing() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(Collections.emptyList());
+        when(leaderElection.isLeader()).thenReturn(false);
 
         schedulerLoop.executeCycle();
 
-        verify(dueStepScanner, never()).scan(anyInt(), anyInt());
-        verify(transitionPublisher, never()).publishAll(anyList(), anyInt());
+        verify(dueStepScanner, never()).scan();
+        verify(transitionPublisher, never()).publishAll(anyList());
     }
 
     @Test
-    void executeCycle_singlePartition_scansAndPublishes() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
+    void executeCycle_leader_scansAndPublishes() {
         List<DueStep> steps = List.of(buildDueStep());
-        when(dueStepScanner.scan(0, 4)).thenReturn(steps);
-        when(transitionPublisher.publishAll(steps, 0)).thenReturn(1);
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps)).thenReturn(1);
 
         schedulerLoop.executeCycle();
 
-        verify(dueStepScanner).scan(0, 4);
-        verify(transitionPublisher).publishAll(steps, 0);
+        verify(dueStepScanner).scan();
+        verify(transitionPublisher).publishAll(steps);
     }
 
     @Test
-    void executeCycle_multiplePartitions_processesEach() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0, 1, 2));
-        when(dueStepScanner.scan(anyInt(), anyInt())).thenReturn(Collections.emptyList());
-        when(transitionPublisher.publishAll(anyList(), anyInt())).thenReturn(0);
+    void executeCycle_emptyBatch_stillRecordsCycleMetric() {
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(Collections.emptyList());
+        when(transitionPublisher.publishAll(anyList())).thenReturn(0);
 
         schedulerLoop.executeCycle();
 
-        verify(dueStepScanner).scan(0, 4);
-        verify(dueStepScanner).scan(1, 4);
-        verify(dueStepScanner).scan(2, 4);
-        verify(transitionPublisher, times(3)).publishAll(anyList(), anyInt());
-    }
-
-    @Test
-    void executeCycle_emptyBatch_stillRecordsMetrics() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
-        when(dueStepScanner.scan(0, 4)).thenReturn(Collections.emptyList());
-        when(transitionPublisher.publishAll(anyList(), anyInt())).thenReturn(0);
-
-        schedulerLoop.executeCycle();
-
-        double cycleCount = meterRegistry.counter("cce.scheduler.cycle.count", "partition", "0").count();
-        assertThat(cycleCount).isEqualTo(1.0);
+        assertThat(meterRegistry.counter("cce.scheduler.cycle.count", "partition", "0").count())
+                .isEqualTo(1.0);
     }
 
     @Test
     void executeCycle_scannerThrows_doesNotTerminate() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0, 1));
-        when(dueStepScanner.scan(0, 4)).thenThrow(new RuntimeException("DB error"));
-        when(dueStepScanner.scan(1, 4)).thenReturn(Collections.emptyList());
-        when(transitionPublisher.publishAll(anyList(), anyInt())).thenReturn(0);
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenThrow(new RuntimeException("DB error"));
 
-        // Should not throw
-        schedulerLoop.executeCycle();
+        schedulerLoop.executeCycle(); // should not throw
 
-        // Second partition still processed despite first one failing
-        verify(dueStepScanner).scan(1, 4);
-    }
-
-    @Test
-    void executeCycle_recordsScanDuration() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
-        when(dueStepScanner.scan(0, 4)).thenReturn(Collections.emptyList());
-        when(transitionPublisher.publishAll(anyList(), anyInt())).thenReturn(0);
-
-        schedulerLoop.executeCycle();
-
-        long timerCount = meterRegistry.timer("cce.scheduler.scan.duration", "partition", "0").count();
-        assertThat(timerCount).isEqualTo(1);
+        assertThat(meterRegistry.counter("cce.scheduler.cycle.count", "partition", "0").count())
+                .isEqualTo(1.0);
     }
 
     @Test
     void executeCycle_recordsScanStepsCount() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
         List<DueStep> steps = List.of(buildDueStep(), buildDueStep(), buildDueStep());
-        when(dueStepScanner.scan(0, 4)).thenReturn(steps);
-        when(transitionPublisher.publishAll(steps, 0)).thenReturn(3);
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps)).thenReturn(3);
 
         schedulerLoop.executeCycle();
 
-        double stepsCount = meterRegistry.counter("cce.scheduler.scan.steps",
-                "transition_type", "all", "partition", "0").count();
-        assertThat(stepsCount).isEqualTo(3.0);
+        assertThat(meterRegistry.counter("cce.scheduler.scan.steps",
+                "transition_type", "all", "partition", "0").count()).isEqualTo(3.0);
     }
 
     @Test
@@ -152,23 +120,23 @@ class SchedulerLoopTest {
         OffsetDateTime latest = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
         DueStep first = buildDueStepAt(earlier);
         DueStep last = buildDueStepAt(latest);
-        // Scanner returns rows in (threshold, id) order; the loop advances to the LAST one.
-        List<DueStep> steps = List.of(first, last);
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
-        when(dueStepScanner.scan(0, 4)).thenReturn(steps);
-        when(transitionPublisher.publishAll(steps, 0)).thenReturn(2);
+        List<DueStep> steps = List.of(first, last); // scanner returns (threshold, id) order
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps)).thenReturn(2);
 
         schedulerLoop.executeCycle();
 
-        verify(partitionCursor).advanceWatermark(0, latest, last.stepInstanceId());
+        verify(partitionCursor).advanceWatermark(
+                PartitionCursorService.SINGLE_PARTITION, latest, last.stepInstanceId());
     }
 
     @Test
-    void executeCycle_partialPublishFailure_doesNotAdvanceWatermark() {
+    void executeCycle_partialPublishFailure_doesNotAdvanceCursor() {
         List<DueStep> steps = List.of(buildDueStep(), buildDueStep());
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
-        when(dueStepScanner.scan(0, 4)).thenReturn(steps);
-        when(transitionPublisher.publishAll(steps, 0)).thenReturn(1); // one failed
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps)).thenReturn(1); // one failed
 
         schedulerLoop.executeCycle();
 
@@ -176,10 +144,10 @@ class SchedulerLoopTest {
     }
 
     @Test
-    void executeCycle_emptyBatch_doesNotAdvanceWatermark() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
-        when(dueStepScanner.scan(0, 4)).thenReturn(Collections.emptyList());
-        when(transitionPublisher.publishAll(anyList(), anyInt())).thenReturn(0);
+    void executeCycle_emptyBatch_doesNotAdvanceCursor() {
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(Collections.emptyList());
+        when(transitionPublisher.publishAll(anyList())).thenReturn(0);
 
         schedulerLoop.executeCycle();
 
@@ -187,12 +155,12 @@ class SchedulerLoopTest {
     }
 
     @Test
-    void executeCycle_watermarkDisabled_doesNotAdvanceWatermark() {
+    void executeCycle_watermarkDisabled_doesNotAdvanceCursor() {
         properties.setWatermarkEnabled(false);
         List<DueStep> steps = List.of(buildDueStep());
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
-        when(dueStepScanner.scan(0, 4)).thenReturn(steps);
-        when(transitionPublisher.publishAll(steps, 0)).thenReturn(1);
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps)).thenReturn(1);
 
         schedulerLoop.executeCycle();
 

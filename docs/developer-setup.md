@@ -50,7 +50,7 @@ The Scheduler Service connects to the **same PostgreSQL database** (`ccedb`) as 
 2. **Use init script** — apply the Compliance Service schema manually before starting the Scheduler
 3. **Testcontainers** — integration tests include init scripts that create both schemas
 
-The Scheduler's own Flyway migrations create only its own tables: `V1__create_scheduler_lease.sql` (`scheduler_lease`) and `V2__create_scheduler_node.sql` (`scheduler_node`, the live-instance registry used for fair-share partition sizing).
+The Scheduler's own Flyway migrations create only its own tables: `V1__create_scheduler_lease.sql` (`scheduler_lease` — leader heartbeat) and `V3__create_scheduler_partition_cursor.sql` (`scheduler_partition_cursor` — the scan watermark). A legacy `scheduler_node` table is created by `V2` and dropped by `V4`.
 
 ### 2.4 Run the Application
 
@@ -114,10 +114,7 @@ cce:
     lease-duration-seconds: ${SCHEDULER_LEASE_DURATION:30}
     leader-retry-interval: ${SCHEDULER_LEADER_RETRY:5000}
     advisory-lock-key: ${SCHEDULER_LOCK_KEY:100001}
-    total-partitions: ${SCHEDULER_TOTAL_PARTITIONS:1}
-    lock-acquire-delay-ms: ${SCHEDULER_LOCK_ACQUIRE_DELAY:50}
     watermark-enabled: ${SCHEDULER_WATERMARK_ENABLED:true}
-    startup-acquire-delay-ms: ${SCHEDULER_STARTUP_ACQUIRE_DELAY:0}
   kafka:
     topics:
       scheduler-triggers: ${KAFKA_TOPIC_SCHEDULER_TRIGGERS:cce.scheduler.triggers}
@@ -151,12 +148,11 @@ management:
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka bootstrap servers |
 | `KAFKA_TOPIC_SCHEDULER_TRIGGERS` | `cce.scheduler.triggers` | Output Kafka topic |
 | `SCHEDULER_SCAN_INTERVAL` | `5000` | Scan interval in milliseconds |
-| `SCHEDULER_BATCH_SIZE` | `100` | Max steps per scan cycle |
-| `SCHEDULER_LEASE_DURATION` | `30` | Lease expiry in seconds; also the staleness window for pruning `scheduler_node` rows |
-| `SCHEDULER_LEADER_RETRY` | `5000` | Leader retry interval in milliseconds; also how often fair share is recomputed |
-| `SCHEDULER_LOCK_KEY` | `100001` | Base PostgreSQL advisory lock key. Partitions use keys `LOCK_KEY + 0` through `LOCK_KEY + TOTAL_PARTITIONS - 1`. |
-| `SCHEDULER_TOTAL_PARTITIONS` | `1` | Number of scan partitions for horizontal scaling. `1` = single-leader (default). Each instance owns at most its fair share, `ceil(TOTAL_PARTITIONS / live-instances)`. |
-| `SCHEDULER_LOCK_ACQUIRE_DELAY` | `50` | Max jitter (ms) between lock attempts to stagger simultaneous starts; even distribution is enforced by the fair-share cap, not this. `0` disables. |
+| `SCHEDULER_BATCH_SIZE` | `100` | Max steps fetched (and published) per scan cycle |
+| `SCHEDULER_LEASE_DURATION` | `30` | Lease expiry (seconds) recorded in the leader heartbeat |
+| `SCHEDULER_LEADER_RETRY` | `5000` | How often an instance (re)attempts the advisory lock (ms) |
+| `SCHEDULER_LOCK_KEY` | `100001` | PostgreSQL advisory lock key for single-leader election |
+| `SCHEDULER_WATERMARK_ENABLED` | `true` | Bound each scan below by the persisted watermark so already-emitted crossings aren't re-scanned every cycle. `false` = scan all due rows every cycle |
 
 ## 4. Project Structure
 
@@ -250,6 +246,5 @@ docker run -p 8083:8083 \
   -e DB_USERNAME=cce_user \
   -e DB_PASSWORD=cce_pass \
   -e KAFKA_BOOTSTRAP_SERVERS=host.docker.internal:9092 \
-  -e SCHEDULER_TOTAL_PARTITIONS=1 \
   cce-scheduler-service
 ```

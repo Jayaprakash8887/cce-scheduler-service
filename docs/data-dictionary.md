@@ -6,9 +6,9 @@ Comprehensive reference for all database tables, entities, enums, Kafka message 
 
 ## 1. Database Tables
 
-### 1.1 `scheduler_lease` — Partition Leader Election & Heartbeat
+### 1.1 `scheduler_lease` — Leader Heartbeat
 
-Multi-row table used for distributed partitioned leader election and heartbeat tracking. One row exists **per partition** (default: 1 row when `total-partitions=1`). A single instance may own and update **multiple** partition rows, but never more than its fair share (`ceil(total-partitions / active-instances)`; see `scheduler_node` below).
+Holds the current leader's heartbeat and lease expiry. The service runs a **single logical partition** with single-leader election, so this table has a **single row** (`partition_index = 0`). The `partition_index` column and its unique constraint are retained for schema continuity. The advisory lock — not this row — is the actual leadership mechanism; the row is heartbeat/observability bookkeeping updated by the current leader.
 
 **Migration:** `V1__create_scheduler_lease.sql`  
 **Owner:** Scheduler Service (read-write)
@@ -16,16 +16,14 @@ Multi-row table used for distributed partitioned leader election and heartbeat t
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | `id` | `UUID` | No | `gen_random_uuid()` | Primary key |
-| `partition_index` | `INTEGER` | No | `0` | Partition number this row represents (0-based) |
-| `leader_id` | `VARCHAR` | Yes | — | Hostname or instance ID of the current partition leader. `NULL` when no leader is active. |
-| `last_heartbeat` | `TIMESTAMPTZ` | Yes | — | Last time the partition leader updated this row. Used for staleness detection. |
+| `partition_index` | `INTEGER` | No | `0` | Always `0` (single logical partition) |
+| `leader_id` | `VARCHAR` | Yes | — | Instance ID (per-process UUID) of the current leader. `NULL` when no leader is active. |
+| `last_heartbeat` | `TIMESTAMPTZ` | Yes | — | Last time the leader updated this row. |
 | `lease_expires_at` | `TIMESTAMPTZ` | Yes | — | When the current lease expires. Computed as `last_heartbeat + leaseDurationSeconds`. |
 
 **Constraints:**
 - `PK`: `id`
 - `UNIQUE`: `partition_index`
-
-**Row-per-partition pattern:** On startup, the migration inserts row(s) for configured partitions. When scaling, a new migration or application startup logic upserts additional partition rows. All subsequent operations are `UPDATE` — never `DELETE`.
 
 ```sql
 CREATE TABLE scheduler_lease (
@@ -37,50 +35,27 @@ CREATE TABLE scheduler_lease (
     CONSTRAINT uq_scheduler_lease_partition UNIQUE (partition_index)
 );
 
--- Insert default partition row (single-leader mode)
 INSERT INTO scheduler_lease (id, partition_index) VALUES (gen_random_uuid(), 0);
 ```
 
-### 1.2 `scheduler_node` — Live-Instance Registry (Fair-Share Sizing)
+### 1.2 `scheduler_node` — Removed
 
-One row per **live scheduler instance** — including standbys that currently own no partitions. Every instance upserts its heartbeat each leader-election cycle; rows whose heartbeat is older than `lease-duration-seconds` are pruned. Instances count the fresh rows to derive the cluster size and, from it, their fair share of partitions (`ceil(total-partitions / active-instances)`). Without this registry a standby would be invisible and the instance that booted first would greedily hold every partition.
+This table was a live-instance registry used to size the fair-share of multiple logical partitions. With the move to a single logical partition + single-leader election, it is no longer used and is **dropped by migration `V4__drop_scheduler_node.sql`** (created by `V2`, dropped by `V4`).
 
-**Migration:** `V2__create_scheduler_node.sql`  
-**Owner:** Scheduler Service (read-write)
+### 1.3 `scheduler_partition_cursor` — Scan Watermark
 
-| Column | Type | Nullable | Default | Description |
-|--------|------|----------|---------|-------------|
-| `node_id` | `VARCHAR` | No | — | Primary key — the instance's `leaderId` (a per-process UUID). |
-| `last_heartbeat` | `TIMESTAMPTZ` | No | — | Last time this instance reported in. Rows older than `lease-duration-seconds` are pruned and excluded from the active count. |
-| `owned_count` | `INTEGER` | No | `0` | Number of partitions this instance currently owns (observability). |
-
-**Constraints:**
-- `PK`: `node_id`
-
-```sql
-CREATE TABLE scheduler_node (
-    node_id        VARCHAR PRIMARY KEY,
-    last_heartbeat TIMESTAMPTZ NOT NULL,
-    owned_count    INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE INDEX idx_scheduler_node_heartbeat ON scheduler_node (last_heartbeat);
-```
-
-### 1.3 `scheduler_partition_cursor` — Per-Partition Scan Watermark
-
-One row **per partition**, holding the scan cursor as a **keyset/seek cursor over the composite key `(threshold, step_id)`** — the exclusive lower bound of the scan window. The scan considers only `step_instance` rows that sort **strictly after** `(watermark, watermark_id)` (i.e. `eff_threshold > watermark`, or `eff_threshold = watermark AND id > watermark_id`), and `SchedulerLoop` advances the cursor to the **last emitted** `(threshold, id)` after a **fully successful** publish cycle. This stops the scheduler from re-selecting and re-publishing the same threshold crossing on every cycle while a step's state is frozen (e.g., while the Compliance Service is lagging or down), which is the primary cause of duplicate events in `cce.scheduler.triggers`.
+A **single-row** table (`partition_index = 0`), holding the scan cursor as a **keyset/seek cursor over the composite key `(threshold, step_id)`** — the exclusive lower bound of the scan window. The scan considers only `step_instance` rows that sort **strictly after** `(watermark, watermark_id)` (i.e. `eff_threshold > watermark`, or `eff_threshold = watermark AND id > watermark_id`), and `SchedulerLoop` advances the cursor to the **last emitted** `(threshold, id)` after a **fully successful** publish cycle. This stops the scheduler from re-selecting and re-publishing the same threshold crossing on every cycle while a step's state is frozen (e.g., while the Compliance Service is lagging or down), which is the primary cause of duplicate events in `cce.scheduler.triggers`.
 
 The `id` component (a **UUID v7** from the Compliance Service, as of its v4→v7 change) breaks threshold ties, so a cohort of steps sharing an **identical threshold** (calendar-date schedules, bulk backfills) drains across cycles `batch-size` at a time — no truncation, no stall — and, because v7 is time-ordered by creation, in creation (FIFO) order. Note the id is only a **tie-breaker under `threshold`**, never the primary cursor: a v7 id encodes *creation* time, not the due/overdue/missed threshold, so ordering by id alone would strand later-due-but-earlier-created steps. Correctness needs only a **total order** over `id`, which Postgres's `uuid` type provides for any version — so pre-change **v4** rows and post-change **v7** rows coexist safely (the FIFO-within-cohort property just applies to the v7 rows).
 
-Written only by the partition's **current owner** (serialized by the advisory lock), so there is no cross-writer contention. The upsert's `WHERE ROW(new) > ROW(old)` guard makes the write monotonic in lexical `(timestamp, id)` order — a stale/clock-skewed value from a new owner after failover can never move the cursor backwards.
+Written only by the **current leader** (serialized by the advisory lock), so there is no cross-writer contention. The upsert's `WHERE ROW(new) > ROW(old)` guard makes the write monotonic in lexical `(timestamp, id)` order — a stale/clock-skewed value from a new owner after failover can never move the cursor backwards.
 
 **Migration:** `V3__create_scheduler_partition_cursor.sql`  
 **Owner:** Scheduler Service (read-write)
 
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
-| `partition_index` | `INTEGER` | No | — | Primary key — partition number this cursor belongs to (0-based). |
+| `partition_index` | `INTEGER` | No | — | Primary key — always `0` (single logical partition). |
 | `watermark` | `TIMESTAMPTZ` | No | — | Timestamp component of the cursor (full microsecond precision). No cursor row ⇒ treated as the epoch (first scan sees the full due backlog up to now). |
 | `watermark_id` | `UUID` | No | `00000000-…-000000000000` | Id component — the `step_instance.id` (UUID v7) of the last emitted step at `watermark`. The min-UUID default sorts before every real id. |
 | `updated_at` | `TIMESTAMPTZ` | No | `now()` | Last time the cursor advanced (observability). |
@@ -190,18 +165,17 @@ All properties are under the `cce.scheduler` prefix.
 | Property | Type | Default | Min | Max | Description |
 |----------|------|---------|-----|-----|-------------|
 | `scan-interval` | `long` (ms) | `5000` | `1000` | `300000` | Delay between scan cycles (`fixedDelay`) |
-| `batch-size` | `int` | `100` | `1` | `1000` | Max steps per scan cycle per partition |
-| `lease-duration-seconds` | `int` | `30` | `10` | `300` | Lease expiry for leader heartbeat |
-| `leader-retry-interval` | `long` (ms) | `5000` | `1000` | `60000` | How often standby retries advisory lock |
-| `advisory-lock-key` | `long` | `100001` | — | — | Base PostgreSQL advisory lock key. Partitions use keys `advisory-lock-key + 0` through `advisory-lock-key + total-partitions - 1`. |
-| `total-partitions` | `int` | `1` | `1` | `64` | Number of scan partitions. Each partition is an independent advisory lock. `1` = single-leader mode (default). Increase for horizontal scaling. Each instance owns at most its fair share (`ceil(total-partitions / active-instances)`), so fewer instances than partitions is safe — no orphaned partitions. |
-| `lock-acquire-delay-ms` | `int` | `50` | `0` | `500` | Max randomized jitter (ms) between consecutive advisory lock acquisition attempts, to stagger truly simultaneous starts. Secondary smoothing only — even distribution is enforced by the fair-share cap, not this delay. Set to `0` to disable. |
-| `watermark-enabled` | `boolean` | `true` | — | — | When `true`, each partition scan is bounded below by the persisted `scheduler_partition_cursor` watermark so already-emitted threshold crossings are not re-scanned every cycle (see §1.3). When `false`, every cycle scans all due rows up to now (legacy behavior) and the watermark is neither read nor advanced. |
-| `startup-acquire-delay-ms` | `long` (ms) | `0` | `0` | `300000` | Grace period after boot during which an instance heartbeats but **defers acquiring partition locks**, so co-starting peers register first and the initial ownership spreads by fair share instead of the first booter grabbing all. `0` disables it; ignored when `total-partitions = 1`. Enabled in the k8s ConfigMap (`30000`). See architecture-overview §4.2. |
+| `batch-size` | `int` | `100` | `1` | `1000` | Max steps fetched (and published) per scan cycle |
+| `lease-duration-seconds` | `int` | `30` | `10` | `300` | Lease expiry recorded in the leader heartbeat |
+| `leader-retry-interval` | `long` (ms) | `5000` | `1000` | `60000` | How often an instance (re)attempts the advisory lock |
+| `advisory-lock-key` | `long` | `100001` | — | — | PostgreSQL advisory lock key for single-leader election |
+| `watermark-enabled` | `boolean` | `true` | — | — | When `true`, each scan is bounded below by the persisted `scheduler_partition_cursor` watermark so already-emitted threshold crossings are not re-scanned every cycle (see §1.3). When `false`, every cycle scans all due rows up to now (legacy behavior) and the watermark is neither read nor advanced. |
 
 ---
 
 ## 6. Metrics
+
+The `partition` tag is retained for continuity but is always `0` (single logical partition).
 
 | Metric Name | Type | Tags | Description |
 |-------------|------|------|-------------|
@@ -209,5 +183,5 @@ All properties are under the `cce.scheduler` prefix.
 | `cce.scheduler.scan.steps` | Counter | `transition_type`, `partition` | Number of steps found per transition type |
 | `cce.scheduler.publish.success` | Counter | `transition_type`, `partition` | Successful Kafka publishes per type |
 | `cce.scheduler.publish.failure` | Counter | `transition_type`, `partition` | Failed Kafka publishes per type |
-| `cce.scheduler.leader.status` | Gauge | `partition` | `1` = partition leader, `0` = standby |
+| `cce.scheduler.leader.status` | Gauge | — | `1` = leader, `0` = standby |
 | `cce.scheduler.cycle.count` | Counter | `partition` | Total scan cycles executed (including empty ones) |
