@@ -50,7 +50,7 @@ spring:
 cce:
   scheduler:
     scan-interval: ${SCHEDULER_SCAN_INTERVAL:5000}
-    batch-size: ${SCHEDULER_BATCH_SIZE:100}
+    batch-size: ${SCHEDULER_BATCH_SIZE:1000}
     lease-duration-seconds: ${SCHEDULER_LEASE_DURATION:30}
     leader-retry-interval: ${SCHEDULER_LEADER_RETRY:5000}
     advisory-lock-key: ${SCHEDULER_LOCK_KEY:100001}

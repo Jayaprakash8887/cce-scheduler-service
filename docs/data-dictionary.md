@@ -165,7 +165,7 @@ All properties are under the `cce.scheduler` prefix.
 | Property | Type | Default | Min | Max | Description |
 |----------|------|---------|-----|-----|-------------|
 | `scan-interval` | `long` (ms) | `5000` | `1000` | `300000` | Delay between scan cycles (`fixedDelay`) |
-| `batch-size` | `int` | `100` | `1` | `1000` | Max steps fetched (and published) per scan cycle |
+| `batch-size` | `int` | `1000` | `1` | `1000` | Max steps fetched (and published) per scan cycle |
 | `lease-duration-seconds` | `int` | `30` | `10` | `300` | Lease expiry recorded in the leader heartbeat |
 | `leader-retry-interval` | `long` (ms) | `5000` | `1000` | `60000` | How often an instance (re)attempts the advisory lock |
 | `advisory-lock-key` | `long` | `100001` | — | — | PostgreSQL advisory lock key for single-leader election |

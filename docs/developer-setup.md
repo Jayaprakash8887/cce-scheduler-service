@@ -148,7 +148,7 @@ management:
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka bootstrap servers |
 | `KAFKA_TOPIC_SCHEDULER_TRIGGERS` | `cce.scheduler.triggers` | Output Kafka topic |
 | `SCHEDULER_SCAN_INTERVAL` | `5000` | Scan interval in milliseconds |
-| `SCHEDULER_BATCH_SIZE` | `100` | Max steps fetched (and published) per scan cycle |
+| `SCHEDULER_BATCH_SIZE` | `1000` | Max steps fetched (and published) per scan cycle |
 | `SCHEDULER_LEASE_DURATION` | `30` | Lease expiry (seconds) recorded in the leader heartbeat |
 | `SCHEDULER_LEADER_RETRY` | `5000` | How often an instance (re)attempts the advisory lock (ms) |
 | `SCHEDULER_LOCK_KEY` | `100001` | PostgreSQL advisory lock key for single-leader election |

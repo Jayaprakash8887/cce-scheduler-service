@@ -32,7 +32,7 @@ All configuration is via environment variables. Defaults are suitable for local 
 | Variable                        | Default   | Description                                          |
 |---------------------------------|-----------|------------------------------------------------------|
 | `SCHEDULER_SCAN_INTERVAL`       | `5000`    | Polling interval in ms (fixedDelay)                  |
-| `SCHEDULER_BATCH_SIZE`          | `100`     | Max steps fetched per scan cycle                     |
+| `SCHEDULER_BATCH_SIZE`          | `1000`    | Max steps fetched (and published) per scan cycle     |
 | `SCHEDULER_LEASE_DURATION`      | `30`      | Leader lease TTL in seconds                          |
 | `SCHEDULER_LEADER_RETRY`        | `5000`    | Retry interval for leader acquisition (ms)           |
 | `SCHEDULER_LOCK_KEY`            | `100001`  | Base pg_advisory_lock key                            |

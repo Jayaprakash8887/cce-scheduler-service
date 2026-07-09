@@ -19,7 +19,7 @@ public class SchedulerProperties {
 
     @Min(1)
     @Max(1000)
-    private int batchSize = 100;
+    private int batchSize = 1000;
 
     @Min(10)
     @Max(300)
