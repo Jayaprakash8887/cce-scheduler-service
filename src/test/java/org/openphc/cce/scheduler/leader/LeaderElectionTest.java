@@ -93,7 +93,7 @@ class LeaderElectionTest {
         when(stmt.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(true);
         when(rs.getBoolean(1)).thenReturn(true);
-        when(leaseRepository.findByPartitionIndex(anyInt())).thenReturn(Optional.empty());
+        when(leaseRepository.findBySingleton(anyInt())).thenReturn(Optional.empty());
         when(leaseRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         LeaderElection election = newElection();
@@ -129,7 +129,7 @@ class LeaderElectionTest {
         when(stmt.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(true);
         when(rs.getBoolean(1)).thenReturn(true);
-        when(leaseRepository.findByPartitionIndex(anyInt())).thenReturn(Optional.empty());
+        when(leaseRepository.findBySingleton(anyInt())).thenReturn(Optional.empty());
         when(leaseRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         LeaderElection election = newElection();

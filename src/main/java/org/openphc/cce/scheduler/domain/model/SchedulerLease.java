@@ -24,8 +24,9 @@ public class SchedulerLease {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
-    @Column(name = "partition_index", nullable = false, unique = true)
-    private int partitionIndex;
+    /** Singleton marker (always 0) — there is exactly one lease row. */
+    @Column(name = "singleton", nullable = false, unique = true)
+    private int singleton;
 
     @Column(name = "leader_id")
     private String leaderId;

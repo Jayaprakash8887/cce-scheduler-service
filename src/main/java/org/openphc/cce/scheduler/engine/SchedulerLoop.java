@@ -16,16 +16,13 @@ import java.util.List;
 @Slf4j
 public class SchedulerLoop {
 
-    /** Single logical partition — the metric tag for the whole-table scan. */
-    private static final String PARTITION = String.valueOf(PartitionCursorService.SINGLE_PARTITION);
-
     private final LeaderElection leaderElection;
     private final DueStepScanner dueStepScanner;
     private final TransitionPublisher transitionPublisher;
     private final SchedulerProperties properties;
     private final MeterRegistry meterRegistry;
     private final ObservabilityConfig metrics;
-    private final PartitionCursorService partitionCursor;
+    private final ScanCursorService scanCursor;
 
     public SchedulerLoop(LeaderElection leaderElection,
                          DueStepScanner dueStepScanner,
@@ -33,14 +30,14 @@ public class SchedulerLoop {
                          SchedulerProperties properties,
                          MeterRegistry meterRegistry,
                          ObservabilityConfig metrics,
-                         PartitionCursorService partitionCursor) {
+                         ScanCursorService scanCursor) {
         this.leaderElection = leaderElection;
         this.dueStepScanner = dueStepScanner;
         this.transitionPublisher = transitionPublisher;
         this.properties = properties;
         this.meterRegistry = meterRegistry;
         this.metrics = metrics;
-        this.partitionCursor = partitionCursor;
+        this.scanCursor = scanCursor;
     }
 
     @Scheduled(fixedDelayString = "${cce.scheduler.scan-interval}")
@@ -56,20 +53,20 @@ public class SchedulerLoop {
             Timer.Sample timerSample = Timer.start(meterRegistry);
 
             List<DueStep> dueSteps = dueStepScanner.scan();
-            metrics.scanStepsCounter("all", PARTITION).increment(dueSteps.size());
+            metrics.scanStepsCounter("all").increment(dueSteps.size());
 
             int published = transitionPublisher.publishAll(dueSteps);
 
             // Commit scan progress: advance the watermark past the emitted crossings.
             advanceWatermark(dueSteps, published);
 
-            timerSample.stop(metrics.scanDurationTimer(PARTITION));
-            metrics.cycleCounter(PARTITION).increment();
+            timerSample.stop(metrics.scanDurationTimer());
+            metrics.cycleCounter().increment();
 
             log.info("Cycle complete — scanned={}, published={}", dueSteps.size(), published);
         } catch (Exception e) {
             log.warn("Error in scan cycle — cycle continues", e);
-            metrics.cycleCounter(PARTITION).increment();
+            metrics.cycleCounter().increment();
         } finally {
             MDC.clear();
         }
@@ -82,12 +79,11 @@ public class SchedulerLoop {
      * retry next cycle; empty cycles do not advance.
      */
     private void advanceWatermark(List<DueStep> dueSteps, int published) {
-        if (!properties.isWatermarkEnabled() || dueSteps.isEmpty() || published != dueSteps.size()) {
+        if (dueSteps.isEmpty() || published != dueSteps.size()) {
             return;
         }
         DueStep last = dueSteps.get(dueSteps.size() - 1);
-        partitionCursor.advanceWatermark(PartitionCursorService.SINGLE_PARTITION,
-                last.thresholdDate(), last.stepInstanceId());
+        scanCursor.advanceWatermark(last.thresholdDate(), last.stepInstanceId());
         log.debug("Advanced cursor to ({},{})", last.thresholdDate(), last.stepInstanceId());
     }
 }

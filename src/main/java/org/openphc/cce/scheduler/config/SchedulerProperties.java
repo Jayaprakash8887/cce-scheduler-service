@@ -15,7 +15,7 @@ public class SchedulerProperties {
 
     @Min(1000)
     @Max(300000)
-    private long scanInterval = 5000;
+    private long scanInterval = 10000;
 
     @Min(1)
     @Max(1000)
@@ -30,11 +30,4 @@ public class SchedulerProperties {
     private long leaderRetryInterval = 5000;
 
     private long advisoryLockKey = 100001;
-
-    /**
-     * When true, each scan is bounded below by a persisted watermark so already-emitted
-     * threshold crossings are not re-scanned every cycle. When false, every cycle scans
-     * all due rows up to now (legacy behavior).
-     */
-    private boolean watermarkEnabled = true;
 }

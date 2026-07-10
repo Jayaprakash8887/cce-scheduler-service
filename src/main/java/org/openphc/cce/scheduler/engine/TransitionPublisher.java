@@ -22,8 +22,6 @@ public class TransitionPublisher {
     /** Upper bound for awaiting a fired batch; each send resolves within delivery.timeout.ms (15s). */
     private static final long BATCH_AWAIT_TIMEOUT_SECONDS = 30;
 
-    private static final String PARTITION = String.valueOf(PartitionCursorService.SINGLE_PARTITION);
-
     private final SchedulerTriggerProducer producer;
     private final ObservabilityConfig metrics;
 
@@ -66,13 +64,13 @@ public class TransitionPublisher {
             try {
                 p.future().get(BATCH_AWAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 successCount++;
-                metrics.publishSuccessCounter(p.step().transitionType().name(), PARTITION).increment();
+                metrics.publishSuccessCounter(p.step().transitionType().name()).increment();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                metrics.publishFailureCounter(p.step().transitionType().name(), PARTITION).increment();
+                metrics.publishFailureCounter(p.step().transitionType().name()).increment();
                 log.warn("Interrupted awaiting publish for step {}", p.step().stepInstanceId());
             } catch (Exception e) {
-                metrics.publishFailureCounter(p.step().transitionType().name(), PARTITION).increment();
+                metrics.publishFailureCounter(p.step().transitionType().name()).increment();
                 log.warn("Failed to publish transition {} for step {}",
                         p.step().transitionType(), p.step().stepInstanceId());
             } finally {

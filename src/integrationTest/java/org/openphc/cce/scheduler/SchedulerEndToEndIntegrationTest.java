@@ -15,7 +15,7 @@ import org.openphc.cce.scheduler.config.SchedulerProperties;
 import org.openphc.cce.scheduler.domain.model.enums.TransitionType;
 import org.openphc.cce.scheduler.engine.DueStep;
 import org.openphc.cce.scheduler.engine.DueStepScanner;
-import org.openphc.cce.scheduler.engine.PartitionCursorService;
+import org.openphc.cce.scheduler.engine.ScanCursorService;
 import org.openphc.cce.scheduler.engine.SchedulerLoop;
 import org.openphc.cce.scheduler.engine.TransitionPublisher;
 import org.openphc.cce.scheduler.kafka.SchedulerTriggerMessage;
@@ -55,7 +55,7 @@ class SchedulerEndToEndIntegrationTest {
     private SchedulerTriggerProducer triggerProducer;
 
     @Mock
-    private PartitionCursorService partitionCursor;
+    private ScanCursorService scanCursor;
 
     private SchedulerProperties properties;
     private SimpleMeterRegistry meterRegistry;
@@ -71,7 +71,7 @@ class SchedulerEndToEndIntegrationTest {
         metrics = new ObservabilityConfig(meterRegistry);
         transitionPublisher = new TransitionPublisher(triggerProducer, metrics);
         schedulerLoop = new SchedulerLoop(leaderElection, dueStepScanner,
-                transitionPublisher, properties, meterRegistry, metrics, partitionCursor);
+                transitionPublisher, properties, meterRegistry, metrics, scanCursor);
     }
 
     private CompletableFuture<SendResult<String, Object>> ok() {
@@ -188,9 +188,9 @@ class SchedulerEndToEndIntegrationTest {
             schedulerLoop.executeCycle();
 
             verify(triggerProducer, never()).publish(any(UUID.class), any(SchedulerTriggerMessage.class));
-            assertThat(meterRegistry.counter("cce.scheduler.cycle.count", "partition", "0").count())
+            assertThat(meterRegistry.counter("cce.scheduler.cycle.count").count())
                     .isEqualTo(1.0);
-            assertThat(meterRegistry.timer("cce.scheduler.scan.duration", "partition", "0").count())
+            assertThat(meterRegistry.timer("cce.scheduler.scan.duration").count())
                     .isEqualTo(1);
         }
     }
@@ -264,7 +264,7 @@ class SchedulerEndToEndIntegrationTest {
 
             schedulerLoop.executeCycle(); // should not throw
 
-            assertThat(meterRegistry.counter("cce.scheduler.cycle.count", "partition", "0").count())
+            assertThat(meterRegistry.counter("cce.scheduler.cycle.count").count())
                     .isEqualTo(1.0);
         }
 
@@ -279,7 +279,7 @@ class SchedulerEndToEndIntegrationTest {
             schedulerLoop.executeCycle(); // should not throw
 
             double failureCount = meterRegistry.counter("cce.scheduler.publish.failure",
-                    "transition_type", "PENDING_TO_DUE", "partition", "0").count();
+                    "transition_type", "PENDING_TO_DUE").count();
             assertThat(failureCount).isEqualTo(1.0);
         }
     }

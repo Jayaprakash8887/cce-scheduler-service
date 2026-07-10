@@ -10,5 +10,5 @@ import java.util.UUID;
 @Repository
 public interface SchedulerLeaseRepository extends JpaRepository<SchedulerLease, UUID> {
 
-    Optional<SchedulerLease> findByPartitionIndex(int partitionIndex);
+    Optional<SchedulerLease> findBySingleton(int singleton);
 }

@@ -24,7 +24,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -35,7 +34,7 @@ class DueStepScannerTest {
     private StepInstanceRepository stepInstanceRepository;
 
     @Mock
-    private PartitionCursorService partitionCursor;
+    private ScanCursorService scanCursor;
 
     private SchedulerProperties properties;
     private DueStepScanner scanner;
@@ -44,10 +43,10 @@ class DueStepScannerTest {
     void setUp() {
         properties = new SchedulerProperties();
         properties.setBatchSize(100);
-        scanner = new DueStepScanner(stepInstanceRepository, properties, partitionCursor);
-        lenient().when(partitionCursor.readWatermark(anyInt())).thenReturn(
-                new PartitionCursorService.Watermark(
-                        PartitionCursorService.BEGINNING, PartitionCursorService.BEGINNING_ID));
+        scanner = new DueStepScanner(stepInstanceRepository, properties, scanCursor);
+        lenient().when(scanCursor.readWatermark()).thenReturn(
+                new ScanCursorService.Watermark(
+                        ScanCursorService.BEGINNING, ScanCursorService.BEGINNING_ID));
     }
 
     @Test
@@ -160,8 +159,8 @@ class DueStepScannerTest {
     void scan_watermarkEnabled_passesReadWatermarkToRepository() {
         OffsetDateTime watermark = OffsetDateTime.now(ZoneOffset.UTC).minusDays(1);
         UUID watermarkId = UUID.randomUUID();
-        when(partitionCursor.readWatermark(PartitionCursorService.SINGLE_PARTITION))
-                .thenReturn(new PartitionCursorService.Watermark(watermark, watermarkId));
+        when(scanCursor.readWatermark())
+                .thenReturn(new ScanCursorService.Watermark(watermark, watermarkId));
         when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(Collections.emptyList());
 
@@ -169,22 +168,6 @@ class DueStepScannerTest {
 
         verify(stepInstanceRepository).findDueSteps(
                 any(OffsetDateTime.class), eq(watermark), eq(watermarkId), eq(100));
-    }
-
-    @Test
-    void scan_watermarkDisabled_passesBeginningAndSkipsCursorRead() {
-        properties.setWatermarkEnabled(false);
-        when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
-                .thenReturn(Collections.emptyList());
-
-        scanner.scan();
-
-        verify(stepInstanceRepository).findDueSteps(
-                any(OffsetDateTime.class),
-                eq(PartitionCursorService.BEGINNING),
-                eq(PartitionCursorService.BEGINNING_ID),
-                eq(100));
-        verify(partitionCursor, never()).readWatermark(anyInt());
     }
 
     private StepInstance buildStepInstance(StepState state,

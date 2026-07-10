@@ -107,17 +107,17 @@ src/main/java/org/openphc/cce/scheduler/
 │   ├── model/
 │   │   ├── StepInstance.java                 # Read-only entity (@Immutable)
 │   │   ├── SchedulerLease.java               # Leader heartbeat entity (single row)
-│   │   ├── PartitionCursor.java              # Scan watermark entity (single cursor)
+│   │   ├── ScanCursor.java                   # Scan watermark entity (single cursor)
 │   │   └── enums/
 │   │       └── StepState.java                # PENDING, DUE, OVERDUE, MISSED, COMPLETED, SKIPPED
 │   └── repository/
 │       ├── StepInstanceRepository.java       # Read-only query (watermark-bounded)
 │       ├── SchedulerLeaseRepository.java     # Lease upsert
-│       └── PartitionCursorRepository.java    # Keyset cursor upsert (monotonic, ROW guard)
+│       └── ScanCursorRepository.java         # Keyset cursor upsert (monotonic, ROW guard)
 ├── engine/
 │   ├── SchedulerLoop.java                    # @Scheduled main loop with leader guard; advances watermark
 │   ├── DueStepScanner.java                   # PostgreSQL query + transition determination; reads watermark
-│   ├── PartitionCursorService.java           # Reads/advances the scan watermark
+│   ├── ScanCursorService.java                # Reads/advances the scan watermark
 │   ├── DueStep.java                          # Record: stepInstanceId, transitionType, metadata
 │   └── TransitionPublisher.java              # Fires all sends, then awaits the batch
 ├── health/
@@ -133,9 +133,11 @@ src/main/resources/
 ├── application-docker.yml
 └── db/migration/
     ├── V1__create_scheduler_lease.sql
-    ├── V2__create_scheduler_node.sql         # (legacy; dropped by V4)
-    ├── V3__create_scheduler_partition_cursor.sql
-    └── V4__drop_scheduler_node.sql
+    ├── V2__create_scheduler_node.sql             # (legacy; dropped by V4)
+    ├── V3__create_scheduler_partition_cursor.sql # (renamed → scheduler_scan_cursor by V5)
+    ├── V4__drop_scheduler_node.sql
+    ├── V5__rename_partition_to_scan.sql          # scheduler_scan_cursor + lease.singleton
+    └── V6__step_instance_scan_indexes.sql        # partial (threshold, id) indexes
 
 src/test/java/org/openphc/cce/scheduler/      # Unit tests
 src/integrationTest/java/org/openphc/cce/scheduler/  # Integration tests
@@ -147,14 +149,14 @@ src/integrationTest/java/org/openphc/cce/scheduler/  # Integration tests
 
 ### 4.1 Scan-Publish Cycle
 
-The core loop runs on a `@Scheduled(fixedDelay)` cadence (default: 5 seconds). The `fixedDelay` ensures no overlap — the next cycle starts only after the previous cycle completes. Only the instance that currently holds the leader lock scans; all other instances stay on standby.
+The core loop runs on a `@Scheduled(fixedDelay)` cadence (default: 10 seconds). The `fixedDelay` ensures no overlap — the next cycle starts only after the previous cycle completes. Only the instance that currently holds the leader lock scans; all other instances stay on standby.
 
 ```
 1. Leader check (do we hold the advisory lock?)
    - If not leader → skip this cycle, return immediately
 2. DueStepScanner.scan()
    a. Read the scan cursor (watermark, watermark_id) from
-      scheduler_partition_cursor (epoch + min-UUID if none)
+      scheduler_scan_cursor (epoch + min-UUID if none)
    b. Query step_instance (whole table) for rows where time thresholds are met
       AND the row sorts STRICTLY AFTER (watermark, watermark_id) in (threshold, id) order
    c. Determine transition type for each row; ORDER BY (threshold, id); LIMIT batchSize
@@ -163,7 +165,7 @@ The core loop runs on a `@Scheduled(fixedDelay)` cadence (default: 5 seconds). T
    - Fire every send asynchronously (non-blocking), collecting the futures
    - Await the batch, then tally success/failure per message
 4. Advance cursor: if the whole batch published successfully, upsert the
-   LAST emitted (threshold, id) into scheduler_partition_cursor (monotonic in
+   LAST emitted (threshold, id) into scheduler_scan_cursor (monotonic in
    (timestamp, id) order). A partial failure leaves the cursor untouched → failed
    crossings retry next cycle; empty cycles do not advance.
 5. Record metrics (scan duration, steps, transitions by type)
@@ -172,7 +174,7 @@ The core loop runs on a `@Scheduled(fixedDelay)` cadence (default: 5 seconds). T
 
 **Async publish:** sends are fired first so the Kafka producer pipelines/batches them, then the batch is awaited — instead of one broker round-trip per message. This is what carries bursts (e.g., a large same-instant cohort) at high throughput on a single instance.
 
-**Duplicate suppression:** Because the Scheduler is the reader and the Compliance Service is the sole writer of `step_instance.state`, a crossing whose state has not yet moved would otherwise re-match the query and be re-published on **every** cycle (unbounded while the consumer lags or is down). The `(threshold, id)` keyset cursor advances past emitted crossings so each threshold crossing is published **once** in the normal case. Using the step's UUID v7 `id` as the tie-breaker means a same-timestamp cohort larger than `batch-size` drains across cycles (in creation order) instead of being truncated. See `scheduler_partition_cursor` in the data dictionary for the accepted gaps (below-cursor inserts; publish-succeeded-but-never-applied). Set `watermark-enabled=false` to disable and scan all due rows every cycle (relying on the idempotent consumer to swallow duplicates).
+**Duplicate suppression:** Because the Scheduler is the reader and the Compliance Service is the sole writer of `step_instance.state`, a crossing whose state has not yet moved would otherwise re-match the query and be re-published on **every** cycle (unbounded while the consumer lags or is down). The `(threshold, id)` keyset cursor advances past emitted crossings so each threshold crossing is published **once** in the normal case. Using the step's UUID v7 `id` as the tie-breaker means a same-timestamp cohort larger than `batch-size` drains across cycles (in creation order) instead of being truncated. See `scheduler_scan_cursor` in the data dictionary for the accepted gaps (below-cursor inserts; publish-succeeded-but-never-applied).
 
 ### 4.2 Single-Leader Election Lifecycle
 
@@ -219,7 +221,7 @@ The Scheduler connects to the **same PostgreSQL database** (`ccedb`) as all othe
 |---|---|---|---|
 | `step_instance` | Compliance Service | **Read-only** | Query for due transitions (watermark-bounded, whole table) |
 | `scheduler_lease` | Scheduler Service | **Read-write** | Leader heartbeat + lease expiry (single row) |
-| `scheduler_partition_cursor` | Scheduler Service | **Read-write** | Scan watermark (single cursor) preventing re-emission of already-published crossings |
+| `scheduler_scan_cursor` | Scheduler Service | **Read-write** | Scan watermark (single cursor) preventing re-emission of already-published crossings |
 | All other tables | Compliance Service | **No access** | Not used by Scheduler |
 
 > The `scheduler_node` table (a former fair-share registry) is dropped by migration `V4`.
@@ -255,16 +257,14 @@ The Scheduler connects to the **same PostgreSQL database** (`ccedb`) as all othe
 
 ### 7.1 Metrics (Micrometer)
 
-The `partition` tag is retained for continuity but is always `0` (single logical partition).
-
 | Metric | Type | Tags | Description |
 |---|---|---|---|
-| `cce.scheduler.scan.duration` | Timer | `partition` | Time spent per scan cycle |
-| `cce.scheduler.scan.steps` | Counter | `transition_type`, `partition` | Steps found per transition type |
-| `cce.scheduler.publish.success` | Counter | `transition_type`, `partition` | Successful Kafka publishes |
-| `cce.scheduler.publish.failure` | Counter | `transition_type`, `partition` | Failed Kafka publishes |
+| `cce.scheduler.scan.duration` | Timer | — | Time spent per scan cycle |
+| `cce.scheduler.scan.steps` | Counter | `transition_type` | Steps found per transition type |
+| `cce.scheduler.publish.success` | Counter | `transition_type` | Successful Kafka publishes |
+| `cce.scheduler.publish.failure` | Counter | `transition_type` | Failed Kafka publishes |
 | `cce.scheduler.leader.status` | Gauge | — | 1 = leader, 0 = standby |
-| `cce.scheduler.cycle.count` | Counter | `partition` | Total scan cycles executed |
+| `cce.scheduler.cycle.count` | Counter | — | Total scan cycles executed |
 
 ### 7.2 Health Indicators
 

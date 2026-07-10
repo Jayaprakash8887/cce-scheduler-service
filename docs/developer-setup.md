@@ -50,7 +50,7 @@ The Scheduler Service connects to the **same PostgreSQL database** (`ccedb`) as 
 2. **Use init script** — apply the Compliance Service schema manually before starting the Scheduler
 3. **Testcontainers** — integration tests include init scripts that create both schemas
 
-The Scheduler's own Flyway migrations create only its own tables: `V1__create_scheduler_lease.sql` (`scheduler_lease` — leader heartbeat) and `V3__create_scheduler_partition_cursor.sql` (`scheduler_partition_cursor` — the scan watermark). A legacy `scheduler_node` table is created by `V2` and dropped by `V4`.
+The Scheduler's own Flyway migrations create its tables: `scheduler_lease` (leader heartbeat) and `scheduler_scan_cursor` (the scan watermark; created as `scheduler_partition_cursor` by `V3`, renamed by `V5`). A legacy `scheduler_node` table is created by `V2` and dropped by `V4`. `V6` adds partial scan indexes on `step_instance` (guarded, `IF NOT EXISTS`).
 
 ### 2.4 Run the Application
 
@@ -84,7 +84,8 @@ spring:
     username: ${DB_USERNAME:cce_user}
     password: ${DB_PASSWORD:cce_pass}
     hikari:
-      maximum-pool-size: ${DB_POOL_SIZE:5}
+      maximum-pool-size: ${DB_POOL_SIZE:2}
+      minimum-idle: 1
   jpa:
     hibernate:
       ddl-auto: validate
@@ -109,12 +110,11 @@ spring:
 
 cce:
   scheduler:
-    scan-interval: ${SCHEDULER_SCAN_INTERVAL:5000}
+    scan-interval: ${SCHEDULER_SCAN_INTERVAL:10000}
     batch-size: ${SCHEDULER_BATCH_SIZE:100}
     lease-duration-seconds: ${SCHEDULER_LEASE_DURATION:30}
     leader-retry-interval: ${SCHEDULER_LEADER_RETRY:5000}
     advisory-lock-key: ${SCHEDULER_LOCK_KEY:100001}
-    watermark-enabled: ${SCHEDULER_WATERMARK_ENABLED:true}
   kafka:
     topics:
       scheduler-triggers: ${KAFKA_TOPIC_SCHEDULER_TRIGGERS:cce.scheduler.triggers}
@@ -147,12 +147,11 @@ management:
 | `DB_POOL_SIZE` | `5` | HikariCP max pool size |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka bootstrap servers |
 | `KAFKA_TOPIC_SCHEDULER_TRIGGERS` | `cce.scheduler.triggers` | Output Kafka topic |
-| `SCHEDULER_SCAN_INTERVAL` | `5000` | Scan interval in milliseconds |
+| `SCHEDULER_SCAN_INTERVAL` | `10000` | Scan interval in milliseconds |
 | `SCHEDULER_BATCH_SIZE` | `1000` | Max steps fetched (and published) per scan cycle |
 | `SCHEDULER_LEASE_DURATION` | `30` | Lease expiry (seconds) recorded in the leader heartbeat |
 | `SCHEDULER_LEADER_RETRY` | `5000` | How often an instance (re)attempts the advisory lock (ms) |
 | `SCHEDULER_LOCK_KEY` | `100001` | PostgreSQL advisory lock key for single-leader election |
-| `SCHEDULER_WATERMARK_ENABLED` | `true` | Bound each scan below by the persisted watermark so already-emitted crossings aren't re-scanned every cycle. `false` = scan all due rows every cycle |
 
 ## 4. Project Structure
 

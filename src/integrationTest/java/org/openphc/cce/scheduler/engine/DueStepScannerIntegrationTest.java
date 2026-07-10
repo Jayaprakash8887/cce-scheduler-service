@@ -49,7 +49,7 @@ class DueStepScannerIntegrationTest {
     private StepInstanceRepository stepInstanceRepository;
 
     @Autowired
-    private PartitionCursorService partitionCursor;
+    private ScanCursorService scanCursor;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -60,10 +60,10 @@ class DueStepScannerIntegrationTest {
     void setUp() {
         SchedulerProperties properties = new SchedulerProperties();
         properties.setBatchSize(100);
-        scanner = new DueStepScanner(stepInstanceRepository, properties, partitionCursor);
+        scanner = new DueStepScanner(stepInstanceRepository, properties, scanCursor);
 
         jdbcTemplate.execute("DELETE FROM step_instance");
-        jdbcTemplate.execute("DELETE FROM scheduler_partition_cursor");
+        jdbcTemplate.execute("DELETE FROM scheduler_scan_cursor");
     }
 
     @Test
@@ -177,12 +177,12 @@ class DueStepScannerIntegrationTest {
 
         SchedulerProperties smallBatch = new SchedulerProperties();
         smallBatch.setBatchSize(2);
-        DueStepScanner pagedScanner = new DueStepScanner(stepInstanceRepository, smallBatch, partitionCursor);
+        DueStepScanner pagedScanner = new DueStepScanner(stepInstanceRepository, smallBatch, scanCursor);
 
         List<DueStep> firstCycle = pagedScanner.scan();
         assertThat(firstCycle).hasSize(2);
         DueStep last = firstCycle.get(firstCycle.size() - 1);
-        partitionCursor.advanceWatermark(0, last.thresholdDate(), last.stepInstanceId());
+        scanCursor.advanceWatermark(last.thresholdDate(), last.stepInstanceId());
 
         List<DueStep> secondCycle = pagedScanner.scan();
         assertThat(secondCycle).hasSize(1); // the third step, not skipped

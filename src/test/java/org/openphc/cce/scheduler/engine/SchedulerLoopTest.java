@@ -20,7 +20,6 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -39,7 +38,7 @@ class SchedulerLoopTest {
     private TransitionPublisher transitionPublisher;
 
     @Mock
-    private PartitionCursorService partitionCursor;
+    private ScanCursorService scanCursor;
 
     private SchedulerProperties properties;
     private SimpleMeterRegistry meterRegistry;
@@ -52,7 +51,7 @@ class SchedulerLoopTest {
         meterRegistry = new SimpleMeterRegistry();
         metrics = new ObservabilityConfig(meterRegistry);
         schedulerLoop = new SchedulerLoop(leaderElection, dueStepScanner,
-                transitionPublisher, properties, meterRegistry, metrics, partitionCursor);
+                transitionPublisher, properties, meterRegistry, metrics, scanCursor);
     }
 
     @Test
@@ -86,7 +85,7 @@ class SchedulerLoopTest {
 
         schedulerLoop.executeCycle();
 
-        assertThat(meterRegistry.counter("cce.scheduler.cycle.count", "partition", "0").count())
+        assertThat(meterRegistry.counter("cce.scheduler.cycle.count").count())
                 .isEqualTo(1.0);
     }
 
@@ -97,7 +96,7 @@ class SchedulerLoopTest {
 
         schedulerLoop.executeCycle(); // should not throw
 
-        assertThat(meterRegistry.counter("cce.scheduler.cycle.count", "partition", "0").count())
+        assertThat(meterRegistry.counter("cce.scheduler.cycle.count").count())
                 .isEqualTo(1.0);
     }
 
@@ -111,7 +110,7 @@ class SchedulerLoopTest {
         schedulerLoop.executeCycle();
 
         assertThat(meterRegistry.counter("cce.scheduler.scan.steps",
-                "transition_type", "all", "partition", "0").count()).isEqualTo(3.0);
+                "transition_type", "all").count()).isEqualTo(3.0);
     }
 
     @Test
@@ -127,8 +126,7 @@ class SchedulerLoopTest {
 
         schedulerLoop.executeCycle();
 
-        verify(partitionCursor).advanceWatermark(
-                PartitionCursorService.SINGLE_PARTITION, latest, last.stepInstanceId());
+        verify(scanCursor).advanceWatermark(latest, last.stepInstanceId());
     }
 
     @Test
@@ -140,7 +138,7 @@ class SchedulerLoopTest {
 
         schedulerLoop.executeCycle();
 
-        verify(partitionCursor, never()).advanceWatermark(anyInt(), any(), any());
+        verify(scanCursor, never()).advanceWatermark(any(), any());
     }
 
     @Test
@@ -151,20 +149,7 @@ class SchedulerLoopTest {
 
         schedulerLoop.executeCycle();
 
-        verify(partitionCursor, never()).advanceWatermark(anyInt(), any(), any());
-    }
-
-    @Test
-    void executeCycle_watermarkDisabled_doesNotAdvanceCursor() {
-        properties.setWatermarkEnabled(false);
-        List<DueStep> steps = List.of(buildDueStep());
-        when(leaderElection.isLeader()).thenReturn(true);
-        when(dueStepScanner.scan()).thenReturn(steps);
-        when(transitionPublisher.publishAll(steps)).thenReturn(1);
-
-        schedulerLoop.executeCycle();
-
-        verify(partitionCursor, never()).advanceWatermark(anyInt(), any(), any());
+        verify(scanCursor, never()).advanceWatermark(any(), any());
     }
 
     private DueStep buildDueStep() {

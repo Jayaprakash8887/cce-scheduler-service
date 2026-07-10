@@ -12,22 +12,22 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * Per-partition scan watermark, a keyset/seek cursor over the composite key
+ * The single-row scan cursor: a keyset/seek cursor over the composite key
  * {@code (watermark, watermark_id)}. Read at the start of each scan to bound the
  * query's lower edge; advanced by {@code SchedulerLoop} to the last emitted
- * {@code (threshold, step id)} after a fully successful publish cycle. One row
- * per partition index.
+ * {@code (threshold, step id)} after a fully successful publish cycle.
  */
 @Entity
-@Table(name = "scheduler_partition_cursor")
+@Table(name = "scheduler_scan_cursor")
 @Getter
 @Setter
 @NoArgsConstructor
-public class PartitionCursor {
+public class ScanCursor {
 
+    /** Fixed singleton key (always 0) — there is exactly one cursor row. */
     @Id
-    @Column(name = "partition_index")
-    private int partitionIndex;
+    @Column(name = "id")
+    private int id;
 
     @Column(name = "watermark", nullable = false)
     private OffsetDateTime watermark;

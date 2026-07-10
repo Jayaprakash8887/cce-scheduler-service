@@ -10,8 +10,10 @@ spring:
     username: ${DB_USERNAME:postgres}
     password: ${DB_PASSWORD:postgres}
     hikari:
-      maximum-pool-size: 5
-      minimum-idle: 2
+      # Single-leader model: one connection is held for the advisory lock (see
+      # LeaderElection), the rest serve short scan/lease/cursor queries.
+      maximum-pool-size: 2
+      minimum-idle: 1
       pool-name: scheduler-hikari
       max-lifetime: 1800000
       idle-timeout: 600000
@@ -46,15 +48,16 @@ spring:
         request.timeout.ms: 5000
         delivery.timeout.ms: 15000
         linger.ms: 50
+        # Sized to hold ~one scan cycle's batch (batch-size messages, ~256B each)
+        batch.size: 262144
 
 cce:
   scheduler:
-    scan-interval: ${SCHEDULER_SCAN_INTERVAL:5000}
+    scan-interval: ${SCHEDULER_SCAN_INTERVAL:10000}
     batch-size: ${SCHEDULER_BATCH_SIZE:1000}
     lease-duration-seconds: ${SCHEDULER_LEASE_DURATION:30}
     leader-retry-interval: ${SCHEDULER_LEADER_RETRY:5000}
     advisory-lock-key: ${SCHEDULER_LOCK_KEY:100001}
-    watermark-enabled: ${SCHEDULER_WATERMARK_ENABLED:true}
   kafka:
     topics:
       scheduler-triggers: ${KAFKA_TOPIC_SCHEDULER_TRIGGERS:cce.scheduler.triggers}

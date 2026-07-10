@@ -31,29 +31,28 @@ All configuration is via environment variables. Defaults are suitable for local 
 
 | Variable                        | Default   | Description                                          |
 |---------------------------------|-----------|------------------------------------------------------|
-| `SCHEDULER_SCAN_INTERVAL`       | `5000`    | Polling interval in ms (fixedDelay)                  |
+| `SCHEDULER_SCAN_INTERVAL`       | `10000`   | Scan interval in ms (fixedDelay)                     |
 | `SCHEDULER_BATCH_SIZE`          | `1000`    | Max steps fetched (and published) per scan cycle     |
 | `SCHEDULER_LEASE_DURATION`      | `30`      | Leader lease TTL in seconds                          |
 | `SCHEDULER_LEADER_RETRY`        | `5000`    | Retry interval for leader acquisition (ms)           |
 | `SCHEDULER_LOCK_KEY`            | `100001`  | Base pg_advisory_lock key                            |
-| `SCHEDULER_WATERMARK_ENABLED`   | `true`    | Bound each scan below by the scan watermark so already-emitted crossings aren't re-published every cycle. `false` = legacy scan-all-due-every-cycle |
 
 ---
 
 ## 2. Database Setup
 
-The service uses Flyway for automatic schema migration. On first startup it creates the `scheduler_lease` and `scheduler_partition_cursor` tables in the shared `ccedb` database. (A legacy `scheduler_node` table is created by `V2` and dropped by `V4`.)
+The service uses Flyway for automatic schema migration. On first startup it creates the `scheduler_lease` and `scheduler_scan_cursor` tables in the shared `ccedb` database. (A legacy `scheduler_node` table is created by `V2` and dropped by `V4`.)
 
 **Pre-requisites:**
 - The `ccedb` database must exist
 - The `step_instance` table (managed by Compliance Service) must exist
-- The service user needs `SELECT` on `step_instance` and full access to `scheduler_lease` and `scheduler_partition_cursor`
+- The service user needs `SELECT` on `step_instance` and full access to `scheduler_lease` and `scheduler_scan_cursor`
 
 ```sql
 -- Minimal grants (if not using superuser)
 GRANT SELECT ON step_instance TO scheduler_user;
 GRANT ALL ON scheduler_lease TO scheduler_user;
-GRANT ALL ON scheduler_partition_cursor TO scheduler_user;
+GRANT ALL ON scheduler_scan_cursor TO scheduler_user;
 GRANT USAGE ON SCHEMA public TO scheduler_user;
 ```
 
@@ -178,14 +177,12 @@ kubectl apply -f deploy/k8s/
 
 | Metric                                    | Type    | Labels                   | Description                       |
 |-------------------------------------------|---------|--------------------------|-----------------------------------|
-| `scheduler.scan.duration`                 | Timer   | partition                | Scan cycle duration               |
-| `scheduler.scan.steps`                    | Counter | transitionType, partition| Steps found per scan              |
-| `scheduler.publish.success`               | Counter | transitionType, partition| Successfully published events     |
-| `scheduler.publish.failure`               | Counter | transitionType, partition| Failed publish attempts           |
-| `scheduler.cycle`                         | Counter | partition                | Total scheduler cycles            |
+| `scheduler.scan.duration`                 | Timer   | —                        | Scan cycle duration               |
+| `scheduler.scan.steps`                    | Counter | transitionType           | Steps found per scan              |
+| `scheduler.publish.success`               | Counter | transitionType           | Successfully published events     |
+| `scheduler.publish.failure`               | Counter | transitionType           | Failed publish attempts           |
+| `scheduler.cycle`                         | Counter | —                        | Total scheduler cycles            |
 | `leader.status`                           | Gauge   | —                        | 1 = leader, 0 = standby           |
-
-> The `partition` label is retained for continuity but is always `0` (single logical partition).
 
 ### Grafana Dashboard
 

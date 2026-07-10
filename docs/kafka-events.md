@@ -143,7 +143,7 @@ The Compliance Service consumes from `cce.scheduler.triggers` with these expecta
 | **At-least-once delivery** | Async batched publish (batch awaited each cycle) + idempotent producer |
 | **Idempotency (producer)** | `enable.idempotence=true` prevents duplicate publishes on retry |
 | **Idempotency (consumer)** | Compliance Service checks current step state before applying transition |
-| **No per-cycle re-emission** | The scan watermark (`scheduler_partition_cursor`) advances past crossings that were published successfully, so a crossing is normally emitted **once** rather than re-published every scan cycle while a step's state is frozen. See the data dictionary for accepted gaps. |
+| **No per-cycle re-emission** | The scan watermark (`scheduler_scan_cursor`) advances past crossings that were published successfully, so a crossing is normally emitted **once** rather than re-published every scan cycle while a step's state is frozen. See the data dictionary for accepted gaps. |
 | **Ordering (per partition)** | Key = `protocolInstanceId` ensures all transitions for a protocol land on the same topic partition and stay ordered. A single active leader produces all triggers, so there is no cross-instance interleaving. |
 | **Durability** | `acks=all` waits for all ISR replicas |
 

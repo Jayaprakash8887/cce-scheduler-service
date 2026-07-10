@@ -128,7 +128,7 @@ class SchedulerTriggerProducerTest {
 
         assertThat(result).isEqualTo(0);
         double failureCount = meterRegistry.counter("cce.scheduler.publish.failure",
-                "transition_type", "PENDING_TO_DUE", "partition", "0").count();
+                "transition_type", "PENDING_TO_DUE").count();
         assertThat(failureCount).isEqualTo(1.0);
     }
 
@@ -142,7 +142,7 @@ class SchedulerTriggerProducerTest {
         transitionPublisher.publishAll(List.of(dueStep));
 
         double successCount = meterRegistry.counter("cce.scheduler.publish.success",
-                "transition_type", "OVERDUE_TO_MISSED", "partition", "0").count();
+                "transition_type", "OVERDUE_TO_MISSED").count();
         assertThat(successCount).isEqualTo(1.0);
     }
 

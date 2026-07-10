@@ -18,45 +18,40 @@ public class ObservabilityConfig {
         this.registry = registry;
     }
 
-    public Timer scanDurationTimer(String partition) {
-        return timerCache.computeIfAbsent("scan.duration-" + partition, k ->
+    public Timer scanDurationTimer() {
+        return timerCache.computeIfAbsent("scan.duration", k ->
                 Timer.builder("cce.scheduler.scan.duration")
-                        .tag("partition", partition)
                         .description("Time spent per scan cycle")
                         .register(registry));
     }
 
-    public Counter scanStepsCounter(String transitionType, String partition) {
-        return counterCache.computeIfAbsent("scan.steps-" + transitionType + "-" + partition, k ->
+    public Counter scanStepsCounter(String transitionType) {
+        return counterCache.computeIfAbsent("scan.steps-" + transitionType, k ->
                 Counter.builder("cce.scheduler.scan.steps")
                         .tag("transition_type", transitionType)
-                        .tag("partition", partition)
                         .description("Number of steps found per transition type")
                         .register(registry));
     }
 
-    public Counter publishSuccessCounter(String transitionType, String partition) {
-        return counterCache.computeIfAbsent("publish.success-" + transitionType + "-" + partition, k ->
+    public Counter publishSuccessCounter(String transitionType) {
+        return counterCache.computeIfAbsent("publish.success-" + transitionType, k ->
                 Counter.builder("cce.scheduler.publish.success")
                         .tag("transition_type", transitionType)
-                        .tag("partition", partition)
                         .description("Successful Kafka publishes")
                         .register(registry));
     }
 
-    public Counter publishFailureCounter(String transitionType, String partition) {
-        return counterCache.computeIfAbsent("publish.failure-" + transitionType + "-" + partition, k ->
+    public Counter publishFailureCounter(String transitionType) {
+        return counterCache.computeIfAbsent("publish.failure-" + transitionType, k ->
                 Counter.builder("cce.scheduler.publish.failure")
                         .tag("transition_type", transitionType)
-                        .tag("partition", partition)
                         .description("Failed Kafka publishes")
                         .register(registry));
     }
 
-    public Counter cycleCounter(String partition) {
-        return counterCache.computeIfAbsent("cycle.count-" + partition, k ->
+    public Counter cycleCounter() {
+        return counterCache.computeIfAbsent("cycle.count", k ->
                 Counter.builder("cce.scheduler.cycle.count")
-                        .tag("partition", partition)
                         .description("Total scan cycles executed")
                         .register(registry));
     }

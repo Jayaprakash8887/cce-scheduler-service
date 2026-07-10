@@ -18,13 +18,13 @@ sequenceDiagram
     participant Kafka as Kafka
     participant Metrics as Metrics
 
-    loop Every fixedDelay (default 5s)
+    loop Every fixedDelay (default 10s)
         SL->>Leader: isLeader()?
         alt Not leader
             Note over SL: Standby — skip cycle
         else Leader
             SL->>Scanner: scan()
-            Scanner->>DB: SELECT watermark, watermark_id FROM scheduler_partition_cursor (epoch + min-UUID if none)
+            Scanner->>DB: SELECT watermark, watermark_id FROM scheduler_scan_cursor (epoch + min-UUID if none)
             Scanner->>DB: SELECT step_instance<br/>WHERE state/date thresholds met<br/>AND (threshold, id) &gt; (watermark, watermark_id)<br/>ORDER BY threshold ASC, id ASC<br/>LIMIT batchSize
             DB-->>Scanner: List of StepInstance
             Scanner-->>SL: List of DueStep
@@ -35,7 +35,7 @@ sequenceDiagram
                 Kafka-->>Publisher: Acks (awaited as a batch)
                 Publisher->>Metrics: publish.success / publish.failure
                 opt All published successfully
-                    SL->>DB: UPSERT scheduler_partition_cursor<br/>SET (watermark, watermark_id) = last emitted (threshold, id)<br/>WHERE new &gt; old (monotonic)
+                    SL->>DB: UPSERT scheduler_scan_cursor<br/>SET (watermark, watermark_id) = last emitted (threshold, id)<br/>WHERE new &gt; old (monotonic)
                 end
             end
 
@@ -99,7 +99,7 @@ flowchart TD
     style M fill:#27AE60,color:white
 ```
 
-> **(W, Wid)** = the keyset scan cursor `(threshold, step id)`. It is the exclusive lower bound in `(threshold, id)` order: the scan skips crossings already emitted in a prior cycle, and the UUID v7 `id` tie-breaker lets a same-timestamp cohort larger than `batch-size` drain across cycles (in creation order) rather than being truncated. `SchedulerLoop` advances the cursor to the last emitted `(threshold, id)` after a fully successful publish (`watermark-enabled=true`, the default). Set `watermark-enabled=false` to disable and scan all due rows every cycle.
+> **(W, Wid)** = the keyset scan cursor `(threshold, step id)`. It is the exclusive lower bound in `(threshold, id)` order: the scan skips crossings already emitted in a prior cycle, and the UUID v7 `id` tie-breaker lets a same-timestamp cohort larger than `batch-size` drain across cycles (in creation order) rather than being truncated. `SchedulerLoop` advances the cursor to the last emitted `(threshold, id)` after a fully successful publish.
 
 ### Indexing & Query Optimization Notes
 
@@ -111,7 +111,7 @@ CREATE INDEX idx_step_instance_due_overdue   ON step_instance (overdue_date, id)
 CREATE INDEX idx_step_instance_overdue_missed ON step_instance (missed_date, id) WHERE state = 'OVERDUE';
 ```
 
-These belong in Compliance-owned migrations. UUID v7 ids are sequential, so such indexes stay compact (append-mostly inserts). Without them the query still works — it just sorts the filtered set.
+These are created by migration `V6__step_instance_scan_indexes.sql` (guarded by a table-exists check, `CREATE INDEX IF NOT EXISTS`, so they coexist with any Compliance-side indexes). UUID v7 ids are sequential, so they stay compact (append-mostly inserts). Verify efficiency after deploy with `EXPLAIN (ANALYZE, BUFFERS)` on the scan query.
 
 ---
 

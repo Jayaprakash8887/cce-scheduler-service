@@ -34,8 +34,8 @@ import java.util.concurrent.locks.ReentrantLock;
 @Slf4j
 public class LeaderElection {
 
-    /** Single logical partition — the lease row / metric this instance heartbeats. */
-    private static final int SINGLE_PARTITION = 0;
+    /** Singleton key of the one lease row this instance heartbeats when leader. */
+    private static final int LEASE_ROW = 0;
 
     private final SchedulerProperties properties;
     private final SchedulerLeaseRepository leaseRepository;
@@ -125,10 +125,10 @@ public class LeaderElection {
     }
 
     private void updateHeartbeat(OffsetDateTime now, OffsetDateTime expiresAt) {
-        SchedulerLease lease = leaseRepository.findByPartitionIndex(SINGLE_PARTITION)
+        SchedulerLease lease = leaseRepository.findBySingleton(LEASE_ROW)
                 .orElseGet(() -> {
                     SchedulerLease newLease = new SchedulerLease();
-                    newLease.setPartitionIndex(SINGLE_PARTITION);
+                    newLease.setSingleton(LEASE_ROW);
                     return newLease;
                 });
         lease.setLeaderId(leaderId);

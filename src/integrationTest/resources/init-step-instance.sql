@@ -17,20 +17,20 @@ CREATE TABLE IF NOT EXISTS step_instance (
 
 CREATE TABLE IF NOT EXISTS scheduler_lease (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    partition_index  INTEGER NOT NULL DEFAULT 0,
+    singleton        INTEGER NOT NULL DEFAULT 0,
     leader_id        VARCHAR,
     last_heartbeat   TIMESTAMPTZ,
     lease_expires_at TIMESTAMPTZ,
-    CONSTRAINT uq_scheduler_lease_partition UNIQUE (partition_index)
+    CONSTRAINT uq_scheduler_lease_singleton UNIQUE (singleton)
 );
 
-INSERT INTO scheduler_lease (id, partition_index)
+INSERT INTO scheduler_lease (id, singleton)
 VALUES (gen_random_uuid(), 0)
-ON CONFLICT (partition_index) DO NOTHING;
+ON CONFLICT (singleton) DO NOTHING;
 
-CREATE TABLE IF NOT EXISTS scheduler_partition_cursor (
-    partition_index INTEGER PRIMARY KEY,
-    watermark       TIMESTAMPTZ NOT NULL,
-    watermark_id    UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS scheduler_scan_cursor (
+    id           INTEGER PRIMARY KEY,
+    watermark    TIMESTAMPTZ NOT NULL,
+    watermark_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
