@@ -49,6 +49,9 @@ class DueStepScannerIntegrationTest {
     private StepInstanceRepository stepInstanceRepository;
 
     @Autowired
+    private ScanCursorService scanCursor;
+
+    @Autowired
     private JdbcTemplate jdbcTemplate;
 
     private DueStepScanner scanner;
@@ -57,9 +60,10 @@ class DueStepScannerIntegrationTest {
     void setUp() {
         SchedulerProperties properties = new SchedulerProperties();
         properties.setBatchSize(100);
-        scanner = new DueStepScanner(stepInstanceRepository, properties);
+        scanner = new DueStepScanner(stepInstanceRepository, properties, scanCursor);
 
         jdbcTemplate.execute("DELETE FROM step_instance");
+        jdbcTemplate.execute("DELETE FROM scheduler_scan_cursor");
     }
 
     @Test
@@ -68,7 +72,7 @@ class DueStepScannerIntegrationTest {
         insertStep(UUID.randomUUID(), protocolId, "PENDING",
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
         assertThat(result).hasSize(1);
         assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.PENDING_TO_DUE);
@@ -82,7 +86,7 @@ class DueStepScannerIntegrationTest {
                 OffsetDateTime.now(ZoneOffset.UTC).minusDays(1),
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
         assertThat(result).hasSize(1);
         assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.DUE_TO_OVERDUE);
@@ -96,7 +100,7 @@ class DueStepScannerIntegrationTest {
                 OffsetDateTime.now(ZoneOffset.UTC).minusDays(1),
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1));
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
         assertThat(result).hasSize(1);
         assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.OVERDUE_TO_MISSED);
@@ -107,7 +111,7 @@ class DueStepScannerIntegrationTest {
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "COMPLETED",
                 OffsetDateTime.now(ZoneOffset.UTC).minusDays(1), null, null);
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
         assertThat(result).isEmpty();
     }
@@ -117,7 +121,7 @@ class DueStepScannerIntegrationTest {
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "SKIPPED",
                 OffsetDateTime.now(ZoneOffset.UTC).minusDays(1), null, null);
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
         assertThat(result).isEmpty();
     }
@@ -127,41 +131,19 @@ class DueStepScannerIntegrationTest {
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING",
                 OffsetDateTime.now(ZoneOffset.UTC).plusHours(1), null, null);
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
         assertThat(result).isEmpty();
     }
 
     @Test
-    void scan_partitionFilter_onlyReturnsMatchingPartition() {
-        // Insert steps with different protocol_instance_ids
-        // With totalPartitions=2, they should be split across partitions
-        UUID proto1 = UUID.randomUUID();
-        UUID proto2 = UUID.randomUUID();
-        OffsetDateTime pastDue = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
-
-        insertStep(UUID.randomUUID(), proto1, "PENDING", pastDue, null, null);
-        insertStep(UUID.randomUUID(), proto2, "PENDING", pastDue, null, null);
-
-        List<DueStep> partition0 = scanner.scan(0, 2);
-        List<DueStep> partition1 = scanner.scan(1, 2);
-
-        // Together both partitions cover all steps
-        assertThat(partition0.size() + partition1.size()).isEqualTo(2);
-        // No overlap
-        List<UUID> ids0 = partition0.stream().map(DueStep::stepInstanceId).toList();
-        List<UUID> ids1 = partition1.stream().map(DueStep::stepInstanceId).toList();
-        assertThat(ids0).doesNotContainAnyElementsOf(ids1);
-    }
-
-    @Test
-    void scan_singlePartition_returnsAllSteps() {
+    void scan_returnsAllDueSteps() {
         OffsetDateTime pastDue = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null, null);
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null, null);
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null, null);
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
         assertThat(result).hasSize(3);
     }
@@ -176,7 +158,7 @@ class DueStepScannerIntegrationTest {
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", earliest, null, null);
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", middle, null, null);
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
         assertThat(result).hasSize(3);
         assertThat(result.get(0).thresholdDate()).isBeforeOrEqualTo(result.get(1).thresholdDate());
@@ -184,11 +166,37 @@ class DueStepScannerIntegrationTest {
     }
 
     @Test
+    void scan_identicalThresholds_drainAcrossCyclesViaKeyset() {
+        // Three PENDING steps sharing the EXACT same due_date — a cohort larger
+        // than the batch size. The keyset (threshold, id) cursor must drain them
+        // across cycles without skipping any (gap "c" closed by the id tie-break).
+        OffsetDateTime sameDue = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null, null);
+
+        SchedulerProperties smallBatch = new SchedulerProperties();
+        smallBatch.setBatchSize(2);
+        DueStepScanner pagedScanner = new DueStepScanner(stepInstanceRepository, smallBatch, scanCursor);
+
+        List<DueStep> firstCycle = pagedScanner.scan();
+        assertThat(firstCycle).hasSize(2);
+        DueStep last = firstCycle.get(firstCycle.size() - 1);
+        scanCursor.advanceWatermark(last.thresholdDate(), last.stepInstanceId());
+
+        List<DueStep> secondCycle = pagedScanner.scan();
+        assertThat(secondCycle).hasSize(1); // the third step, not skipped
+
+        List<UUID> firstIds = firstCycle.stream().map(DueStep::stepInstanceId).toList();
+        assertThat(secondCycle.get(0).stepInstanceId()).isNotIn(firstIds);
+    }
+
+    @Test
     void scan_metadata_containsExpectedFields() {
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING",
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
         assertThat(result.get(0).metadata().has("actionId")).isTrue();
         assertThat(result.get(0).metadata().has("repeatIndex")).isTrue();

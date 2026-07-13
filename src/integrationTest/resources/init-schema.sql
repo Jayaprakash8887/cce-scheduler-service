@@ -1,5 +1,5 @@
 -- Full schema for E2E integration tests
--- Includes both Compliance Service schema (step_instance, protocol_instance) and Scheduler schema (scheduler_lease)
+-- Includes both Compliance Service schema (step_instance, protocol_instance) and Scheduler schema
 
 -- Compliance Service tables (read-only for scheduler)
 CREATE TABLE IF NOT EXISTS protocol_instance (
@@ -28,15 +28,16 @@ CREATE TABLE IF NOT EXISTS step_instance (
 
 -- Scheduler owned tables
 CREATE TABLE IF NOT EXISTS scheduler_lease (
-    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    partition_index  INTEGER NOT NULL DEFAULT 0,
+    id               INTEGER PRIMARY KEY,
     leader_id        VARCHAR,
     last_heartbeat   TIMESTAMPTZ,
-    lease_expires_at TIMESTAMPTZ,
-    CONSTRAINT uq_scheduler_lease_partition UNIQUE (partition_index)
+    lease_expires_at TIMESTAMPTZ
 );
 
--- Default partition rows for multi-partition tests
-INSERT INTO scheduler_lease (id, partition_index) VALUES (gen_random_uuid(), 0) ON CONFLICT (partition_index) DO NOTHING;
-INSERT INTO scheduler_lease (id, partition_index) VALUES (gen_random_uuid(), 1) ON CONFLICT (partition_index) DO NOTHING;
-INSERT INTO scheduler_lease (id, partition_index) VALUES (gen_random_uuid(), 2) ON CONFLICT (partition_index) DO NOTHING;
+-- Scheduler scan watermark (single row)
+CREATE TABLE IF NOT EXISTS scheduler_scan_cursor (
+    id           INTEGER PRIMARY KEY,
+    watermark    TIMESTAMPTZ NOT NULL,
+    watermark_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);

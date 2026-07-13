@@ -37,9 +37,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest(properties = {
         "cce.scheduler.scan-interval=60000",
-        "cce.scheduler.leader-retry-interval=60000",
-        "cce.scheduler.total-partitions=1",
-        "cce.scheduler.lock-acquire-delay-ms=0"
+        "cce.scheduler.leader-retry-interval=60000"
 })
 @Testcontainers
 class SchedulerLoopIntegrationTest {
@@ -94,9 +92,10 @@ class SchedulerLoopIntegrationTest {
         consumer.subscribe(Collections.singletonList(TOPIC));
 
         jdbcTemplate.execute("DELETE FROM step_instance");
+        jdbcTemplate.execute("DELETE FROM scheduler_scan_cursor");
 
         // Ensure this instance is leader
-        leaderElection.tryAcquirePartitions();
+        leaderElection.tryAcquireLeadership();
     }
 
     @AfterEach

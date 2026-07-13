@@ -7,7 +7,7 @@
     <springProfile name="!local">
         <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
             <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
-                <pattern>{"timestamp":"%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX}","level":"%level","logger":"%logger{36}","thread":"%thread","message":"%msg","correlationId":"%X{correlationId:-}","stepInstanceId":"%X{stepInstanceId:-}","transitionType":"%X{transitionType:-}","leaderStatus":"%X{leaderStatus:-}","ownedPartitions":"%X{ownedPartitions:-}","currentPartition":"%X{currentPartition:-}","totalPartitions":"%X{totalPartitions:-}"}%n</pattern>
+                <pattern>{"timestamp":"%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX}","level":"%level","logger":"%logger{36}","thread":"%thread","message":"%msg","correlationId":"%X{correlationId:-}","stepInstanceId":"%X{stepInstanceId:-}","transitionType":"%X{transitionType:-}","leaderStatus":"%X{leaderStatus:-}"}%n</pattern>
             </encoder>
         </appender>
     </springProfile>
@@ -16,7 +16,7 @@
     <springProfile name="local">
         <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
             <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
-                <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%X{correlationId:-}|p%X{currentPartition:-}] - %msg%n</pattern>
+                <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%X{correlationId:-}] - %msg%n</pattern>
             </encoder>
         </appender>
     </springProfile>

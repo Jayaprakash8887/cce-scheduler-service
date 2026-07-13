@@ -16,12 +16,13 @@ public class LeaderHealthIndicator implements HealthIndicator {
 
     @Override
     public Health health() {
-        Health.Builder builder = leaderElection.isLeader() ? Health.up() : Health.outOfService();
+        // Always UP: a standby is healthy and ready to take over — only not currently leading.
+        // The `isLeader` detail distinguishes leader from standby without failing readiness,
+        // so every replica stays in rotation for fast failover.
+        Health.Builder builder = Health.up();
 
         builder.withDetail("leaderId", leaderElection.getLeaderId())
-                .withDetail("isLeader", leaderElection.isLeader())
-                .withDetail("ownedPartitions", leaderElection.getOwnedPartitions())
-                .withDetail("totalPartitions", leaderElection.getTotalPartitions());
+                .withDetail("isLeader", leaderElection.isLeader());
 
         if (leaderElection.getLastHeartbeat() != null) {
             builder.withDetail("lastHeartbeat", leaderElection.getLastHeartbeat().toString());

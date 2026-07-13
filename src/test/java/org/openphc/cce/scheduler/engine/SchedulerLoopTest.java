@@ -19,10 +19,9 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -38,6 +37,9 @@ class SchedulerLoopTest {
     @Mock
     private TransitionPublisher transitionPublisher;
 
+    @Mock
+    private ScanCursorService scanCursor;
+
     private SchedulerProperties properties;
     private SimpleMeterRegistry meterRegistry;
     private ObservabilityConfig metrics;
@@ -46,108 +48,120 @@ class SchedulerLoopTest {
     @BeforeEach
     void setUp() {
         properties = new SchedulerProperties();
-        properties.setTotalPartitions(4);
         meterRegistry = new SimpleMeterRegistry();
         metrics = new ObservabilityConfig(meterRegistry);
         schedulerLoop = new SchedulerLoop(leaderElection, dueStepScanner,
-                transitionPublisher, properties, meterRegistry, metrics);
+                transitionPublisher, properties, meterRegistry, metrics, scanCursor);
     }
 
     @Test
     void executeCycle_standby_skipsProcessing() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(Collections.emptyList());
+        when(leaderElection.isLeader()).thenReturn(false);
 
         schedulerLoop.executeCycle();
 
-        verify(dueStepScanner, never()).scan(anyInt(), anyInt());
-        verify(transitionPublisher, never()).publishAll(anyList(), anyInt());
+        verify(dueStepScanner, never()).scan();
+        verify(transitionPublisher, never()).publishAll(anyList());
     }
 
     @Test
-    void executeCycle_singlePartition_scansAndPublishes() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
+    void executeCycle_leader_scansAndPublishes() {
         List<DueStep> steps = List.of(buildDueStep());
-        when(dueStepScanner.scan(0, 4)).thenReturn(steps);
-        when(transitionPublisher.publishAll(steps, 0)).thenReturn(1);
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps)).thenReturn(1);
 
         schedulerLoop.executeCycle();
 
-        verify(dueStepScanner).scan(0, 4);
-        verify(transitionPublisher).publishAll(steps, 0);
+        verify(dueStepScanner).scan();
+        verify(transitionPublisher).publishAll(steps);
     }
 
     @Test
-    void executeCycle_multiplePartitions_processesEach() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0, 1, 2));
-        when(dueStepScanner.scan(anyInt(), anyInt())).thenReturn(Collections.emptyList());
-        when(transitionPublisher.publishAll(anyList(), anyInt())).thenReturn(0);
+    void executeCycle_emptyBatch_stillRecordsCycleMetric() {
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(Collections.emptyList());
+        when(transitionPublisher.publishAll(anyList())).thenReturn(0);
 
         schedulerLoop.executeCycle();
 
-        verify(dueStepScanner).scan(0, 4);
-        verify(dueStepScanner).scan(1, 4);
-        verify(dueStepScanner).scan(2, 4);
-        verify(transitionPublisher, times(3)).publishAll(anyList(), anyInt());
-    }
-
-    @Test
-    void executeCycle_emptyBatch_stillRecordsMetrics() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
-        when(dueStepScanner.scan(0, 4)).thenReturn(Collections.emptyList());
-        when(transitionPublisher.publishAll(anyList(), anyInt())).thenReturn(0);
-
-        schedulerLoop.executeCycle();
-
-        double cycleCount = meterRegistry.counter("cce.scheduler.cycle.count", "partition", "0").count();
-        assertThat(cycleCount).isEqualTo(1.0);
+        assertThat(meterRegistry.counter("cce.scheduler.cycle.count").count())
+                .isEqualTo(1.0);
     }
 
     @Test
     void executeCycle_scannerThrows_doesNotTerminate() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0, 1));
-        when(dueStepScanner.scan(0, 4)).thenThrow(new RuntimeException("DB error"));
-        when(dueStepScanner.scan(1, 4)).thenReturn(Collections.emptyList());
-        when(transitionPublisher.publishAll(anyList(), anyInt())).thenReturn(0);
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenThrow(new RuntimeException("DB error"));
 
-        // Should not throw
-        schedulerLoop.executeCycle();
+        schedulerLoop.executeCycle(); // should not throw
 
-        // Second partition still processed despite first one failing
-        verify(dueStepScanner).scan(1, 4);
-    }
-
-    @Test
-    void executeCycle_recordsScanDuration() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
-        when(dueStepScanner.scan(0, 4)).thenReturn(Collections.emptyList());
-        when(transitionPublisher.publishAll(anyList(), anyInt())).thenReturn(0);
-
-        schedulerLoop.executeCycle();
-
-        long timerCount = meterRegistry.timer("cce.scheduler.scan.duration", "partition", "0").count();
-        assertThat(timerCount).isEqualTo(1);
+        assertThat(meterRegistry.counter("cce.scheduler.cycle.count").count())
+                .isEqualTo(1.0);
     }
 
     @Test
     void executeCycle_recordsScanStepsCount() {
-        when(leaderElection.getOwnedPartitions()).thenReturn(List.of(0));
         List<DueStep> steps = List.of(buildDueStep(), buildDueStep(), buildDueStep());
-        when(dueStepScanner.scan(0, 4)).thenReturn(steps);
-        when(transitionPublisher.publishAll(steps, 0)).thenReturn(3);
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps)).thenReturn(3);
 
         schedulerLoop.executeCycle();
 
-        double stepsCount = meterRegistry.counter("cce.scheduler.scan.steps",
-                "transition_type", "all", "partition", "0").count();
-        assertThat(stepsCount).isEqualTo(3.0);
+        assertThat(meterRegistry.counter("cce.scheduler.scan.steps",
+                "transition_type", "all").count()).isEqualTo(3.0);
+    }
+
+    @Test
+    void executeCycle_allPublished_advancesCursorToLastEmitted() {
+        OffsetDateTime earlier = OffsetDateTime.now(ZoneOffset.UTC).minusHours(2);
+        OffsetDateTime latest = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
+        DueStep first = buildDueStepAt(earlier);
+        DueStep last = buildDueStepAt(latest);
+        List<DueStep> steps = List.of(first, last); // scanner returns (threshold, id) order
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps)).thenReturn(2);
+
+        schedulerLoop.executeCycle();
+
+        verify(scanCursor).advanceWatermark(latest, last.stepInstanceId());
+    }
+
+    @Test
+    void executeCycle_partialPublishFailure_doesNotAdvanceCursor() {
+        List<DueStep> steps = List.of(buildDueStep(), buildDueStep());
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(steps);
+        when(transitionPublisher.publishAll(steps)).thenReturn(1); // one failed
+
+        schedulerLoop.executeCycle();
+
+        verify(scanCursor, never()).advanceWatermark(any(), any());
+    }
+
+    @Test
+    void executeCycle_emptyBatch_doesNotAdvanceCursor() {
+        when(leaderElection.isLeader()).thenReturn(true);
+        when(dueStepScanner.scan()).thenReturn(Collections.emptyList());
+        when(transitionPublisher.publishAll(anyList())).thenReturn(0);
+
+        schedulerLoop.executeCycle();
+
+        verify(scanCursor, never()).advanceWatermark(any(), any());
     }
 
     private DueStep buildDueStep() {
+        return buildDueStepAt(OffsetDateTime.now(ZoneOffset.UTC));
+    }
+
+    private DueStep buildDueStepAt(OffsetDateTime thresholdDate) {
         return new DueStep(
                 UUID.randomUUID(),
                 UUID.randomUUID(),
                 TransitionType.PENDING_TO_DUE,
-                OffsetDateTime.now(ZoneOffset.UTC),
+                thresholdDate,
                 JsonNodeFactory.instance.objectNode()
         );
     }

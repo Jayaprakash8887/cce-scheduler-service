@@ -1,13 +1,9 @@
+-- Leader heartbeat (single-leader model): a single row keyed by id = 0. The advisory
+-- lock is the leadership mechanism; this row is heartbeat/observability bookkeeping
+-- updated (upserted) by the current leader.
 CREATE TABLE IF NOT EXISTS scheduler_lease (
-    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    partition_index  INTEGER NOT NULL DEFAULT 0,
+    id               INTEGER PRIMARY KEY,
     leader_id        VARCHAR,
     last_heartbeat   TIMESTAMPTZ,
-    lease_expires_at TIMESTAMPTZ,
-    CONSTRAINT uq_scheduler_lease_partition UNIQUE (partition_index)
+    lease_expires_at TIMESTAMPTZ
 );
-
--- Insert default partition row (single-leader mode)
-INSERT INTO scheduler_lease (id, partition_index)
-VALUES (gen_random_uuid(), 0)
-ON CONFLICT (partition_index) DO NOTHING;

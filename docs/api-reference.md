@@ -46,30 +46,7 @@ Returns aggregate health status including custom `leaderElection` indicator.
     "leaderElection": {
       "status": "UP",
       "details": {
-        "leader": true,
-        "ownedPartitions": [0, 1],
-        "totalPartitions": 3,
-        "leaderId": "scheduler-instance-1",
-        "lastHeartbeat": "2026-03-25T10:00:05Z",
-        "leaseExpiresAt": "2026-03-25T10:00:35Z"
-      }
-    }
-  }
-}
-```
-
-**Instance owning all partitions (single-instance with total-partitions=3):**
-
-```json
-{
-  "status": "UP",
-  "components": {
-    "leaderElection": {
-      "status": "UP",
-      "details": {
-        "leader": true,
-        "ownedPartitions": [0, 1, 2],
-        "totalPartitions": 3,
+        "isLeader": true,
         "leaderId": "scheduler-instance-1",
         "lastHeartbeat": "2026-03-25T10:00:05Z",
         "leaseExpiresAt": "2026-03-25T10:00:35Z"
@@ -88,19 +65,15 @@ Returns aggregate health status including custom `leaderElection` indicator.
     "leaderElection": {
       "status": "UP",
       "details": {
-        "leader": false,
-        "ownedPartitions": [],
-        "totalPartitions": 3,
-        "leaderId": null,
-        "lastHeartbeat": null,
-        "leaseExpiresAt": null
+        "isLeader": false,
+        "leaderId": "scheduler-instance-2"
       }
     }
   }
 }
 ```
 
-> **Note:** `leaderElection.status` is `UP` as long as the election mechanism is functional — regardless of whether this instance owns any partitions. The `leader` field indicates whether any partition is owned, and `ownedPartitions` lists exactly which partitions this instance processes.
+> **Note:** `leaderElection` reports `UP` on **every** replica — the leader and the standbys — so all replicas pass readiness and stay in rotation for fast failover. Use the `isLeader` detail (or the `cce.scheduler.leader.status` gauge) to tell which instance is currently leading. `lastHeartbeat` / `leaseExpiresAt` are included only once this instance has been leader.
 
 ---
 
@@ -113,26 +86,26 @@ Exposes all Micrometer metrics in Prometheus scrape format. Key scheduler-specif
 ```
 # HELP cce_scheduler_scan_duration_seconds Time spent per scan cycle
 # TYPE cce_scheduler_scan_duration_seconds summary
-cce_scheduler_scan_duration_seconds_count{partition="0"} 120.0
-cce_scheduler_scan_duration_seconds_sum{partition="0"} 3.456
+cce_scheduler_scan_duration_seconds_count 120.0
+cce_scheduler_scan_duration_seconds_sum 3.456
 
 # HELP cce_scheduler_scan_steps_total Steps found per transition type
 # TYPE cce_scheduler_scan_steps_total counter
-cce_scheduler_scan_steps_total{transition_type="PENDING_TO_DUE",partition="0"} 45.0
-cce_scheduler_scan_steps_total{transition_type="DUE_TO_OVERDUE",partition="0"} 12.0
-cce_scheduler_scan_steps_total{transition_type="OVERDUE_TO_MISSED",partition="0"} 3.0
+cce_scheduler_scan_steps_total{transition_type="PENDING_TO_DUE"} 45.0
+cce_scheduler_scan_steps_total{transition_type="DUE_TO_OVERDUE"} 12.0
+cce_scheduler_scan_steps_total{transition_type="OVERDUE_TO_MISSED"} 3.0
 
 # HELP cce_scheduler_publish_success_total Successful Kafka publishes
 # TYPE cce_scheduler_publish_success_total counter
-cce_scheduler_publish_success_total{transition_type="PENDING_TO_DUE",partition="0"} 45.0
+cce_scheduler_publish_success_total{transition_type="PENDING_TO_DUE"} 45.0
 
 # HELP cce_scheduler_leader_status Current leader status
 # TYPE cce_scheduler_leader_status gauge
-cce_scheduler_leader_status{partition="0"} 1.0
+cce_scheduler_leader_status 1.0
 
 # HELP cce_scheduler_cycle_count_total Total scan cycles executed
 # TYPE cce_scheduler_cycle_count_total counter
-cce_scheduler_cycle_count_total{partition="0"} 120.0
+cce_scheduler_cycle_count_total 120.0
 ```
 
 ---

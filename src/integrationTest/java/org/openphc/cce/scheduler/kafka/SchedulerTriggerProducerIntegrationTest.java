@@ -29,6 +29,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -98,8 +99,7 @@ class SchedulerTriggerProducerIntegrationTest {
                 OffsetDateTime.now(ZoneOffset.UTC),
                 "sched-PENDING_TO_DUE-" + stepId.toString().substring(0, 8));
 
-        boolean success = producer.publish(protocolId, message);
-        assertThat(success).isTrue();
+        producer.publish(protocolId, message).get(10, TimeUnit.SECONDS);
 
         ConsumerRecord<String, String> record = pollSingleRecord();
         assertThat(record).isNotNull();
@@ -112,7 +112,7 @@ class SchedulerTriggerProducerIntegrationTest {
     }
 
     @Test
-    void publish_allTransitionTypes_succeed() {
+    void publish_allTransitionTypes_succeed() throws Exception {
         for (TransitionType type : TransitionType.values()) {
             UUID protocolId = UUID.randomUUID();
             UUID stepId = UUID.randomUUID();
@@ -121,8 +121,7 @@ class SchedulerTriggerProducerIntegrationTest {
                     OffsetDateTime.now(ZoneOffset.UTC),
                     "sched-" + type.name() + "-" + stepId.toString().substring(0, 8));
 
-            boolean success = producer.publish(protocolId, message);
-            assertThat(success).isTrue();
+            producer.publish(protocolId, message).get(10, TimeUnit.SECONDS);
         }
 
         // Consume all messages
@@ -140,7 +139,7 @@ class SchedulerTriggerProducerIntegrationTest {
                     stepId, TransitionType.PENDING_TO_DUE,
                     OffsetDateTime.now(ZoneOffset.UTC),
                     "sched-PENDING_TO_DUE-" + stepId.toString().substring(0, 8));
-            producer.publish(protocolId, message);
+            producer.publish(protocolId, message).get(10, TimeUnit.SECONDS);
         }
 
         ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(10));

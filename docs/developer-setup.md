@@ -50,7 +50,7 @@ The Scheduler Service connects to the **same PostgreSQL database** (`ccedb`) as 
 2. **Use init script** — apply the Compliance Service schema manually before starting the Scheduler
 3. **Testcontainers** — integration tests include init scripts that create both schemas
 
-The Scheduler's own Flyway migrations create only its own tables: `V1__create_scheduler_lease.sql` (`scheduler_lease`) and `V2__create_scheduler_node.sql` (`scheduler_node`, the live-instance registry used for fair-share partition sizing).
+The Scheduler's own Flyway migrations create its tables: `V1__create_scheduler_lease.sql` (`scheduler_lease` — the leader heartbeat, a single row keyed by `id = 0`) and `V2__scheduler_scan_cursor.sql` (`scheduler_scan_cursor` — the scan watermark, plus guarded partial scan indexes on `step_instance` via `CREATE INDEX IF NOT EXISTS`).
 
 ### 2.4 Run the Application
 
@@ -84,7 +84,8 @@ spring:
     username: ${DB_USERNAME:cce_user}
     password: ${DB_PASSWORD:cce_pass}
     hikari:
-      maximum-pool-size: ${DB_POOL_SIZE:5}
+      maximum-pool-size: ${DB_POOL_SIZE:2}
+      minimum-idle: 1
   jpa:
     hibernate:
       ddl-auto: validate
@@ -109,13 +110,11 @@ spring:
 
 cce:
   scheduler:
-    scan-interval: ${SCHEDULER_SCAN_INTERVAL:5000}
+    scan-interval: ${SCHEDULER_SCAN_INTERVAL:10000}
     batch-size: ${SCHEDULER_BATCH_SIZE:100}
     lease-duration-seconds: ${SCHEDULER_LEASE_DURATION:30}
     leader-retry-interval: ${SCHEDULER_LEADER_RETRY:5000}
     advisory-lock-key: ${SCHEDULER_LOCK_KEY:100001}
-    total-partitions: ${SCHEDULER_TOTAL_PARTITIONS:1}
-    lock-acquire-delay-ms: ${SCHEDULER_LOCK_ACQUIRE_DELAY:50}
   kafka:
     topics:
       scheduler-triggers: ${KAFKA_TOPIC_SCHEDULER_TRIGGERS:cce.scheduler.triggers}
@@ -145,16 +144,14 @@ management:
 | `DB_NAME` | `ccedb` | Shared database name (all CCE services) |
 | `DB_USERNAME` | `cce_user` | Database username (shared with Collector Service) |
 | `DB_PASSWORD` | `cce_pass` | Database password (shared with Collector Service) |
-| `DB_POOL_SIZE` | `5` | HikariCP max pool size |
+| `DB_POOL_SIZE` | `2` | HikariCP max pool size (single-leader model — one connection holds the advisory lock, the rest serve short scan/lease/cursor queries) |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka bootstrap servers |
 | `KAFKA_TOPIC_SCHEDULER_TRIGGERS` | `cce.scheduler.triggers` | Output Kafka topic |
-| `SCHEDULER_SCAN_INTERVAL` | `5000` | Scan interval in milliseconds |
-| `SCHEDULER_BATCH_SIZE` | `100` | Max steps per scan cycle |
-| `SCHEDULER_LEASE_DURATION` | `30` | Lease expiry in seconds; also the staleness window for pruning `scheduler_node` rows |
-| `SCHEDULER_LEADER_RETRY` | `5000` | Leader retry interval in milliseconds; also how often fair share is recomputed |
-| `SCHEDULER_LOCK_KEY` | `100001` | Base PostgreSQL advisory lock key. Partitions use keys `LOCK_KEY + 0` through `LOCK_KEY + TOTAL_PARTITIONS - 1`. |
-| `SCHEDULER_TOTAL_PARTITIONS` | `1` | Number of scan partitions for horizontal scaling. `1` = single-leader (default). Each instance owns at most its fair share, `ceil(TOTAL_PARTITIONS / live-instances)`. |
-| `SCHEDULER_LOCK_ACQUIRE_DELAY` | `50` | Max jitter (ms) between lock attempts to stagger simultaneous starts; even distribution is enforced by the fair-share cap, not this. `0` disables. |
+| `SCHEDULER_SCAN_INTERVAL` | `10000` | Scan interval in milliseconds |
+| `SCHEDULER_BATCH_SIZE` | `1000` | Max steps fetched (and published) per scan cycle |
+| `SCHEDULER_LEASE_DURATION` | `30` | Lease expiry (seconds) recorded in the leader heartbeat |
+| `SCHEDULER_LEADER_RETRY` | `5000` | How often an instance (re)attempts the advisory lock (ms) |
+| `SCHEDULER_LOCK_KEY` | `100001` | PostgreSQL advisory lock key for single-leader election |
 
 ## 4. Project Structure
 
@@ -248,6 +245,5 @@ docker run -p 8083:8083 \
   -e DB_USERNAME=cce_user \
   -e DB_PASSWORD=cce_pass \
   -e KAFKA_BOOTSTRAP_SERVERS=host.docker.internal:9092 \
-  -e SCHEDULER_TOTAL_PARTITIONS=1 \
   cce-scheduler-service
 ```

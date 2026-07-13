@@ -31,30 +31,28 @@ All configuration is via environment variables. Defaults are suitable for local 
 
 | Variable                        | Default   | Description                                          |
 |---------------------------------|-----------|------------------------------------------------------|
-| `SCHEDULER_SCAN_INTERVAL`       | `5000`    | Polling interval in ms (fixedDelay)                  |
-| `SCHEDULER_BATCH_SIZE`          | `100`     | Max steps fetched per scan cycle                     |
+| `SCHEDULER_SCAN_INTERVAL`       | `10000`   | Scan interval in ms (fixedDelay)                     |
+| `SCHEDULER_BATCH_SIZE`          | `1000`    | Max steps fetched (and published) per scan cycle     |
 | `SCHEDULER_LEASE_DURATION`      | `30`      | Leader lease TTL in seconds                          |
 | `SCHEDULER_LEADER_RETRY`        | `5000`    | Retry interval for leader acquisition (ms)           |
 | `SCHEDULER_LOCK_KEY`            | `100001`  | Base pg_advisory_lock key                            |
-| `SCHEDULER_TOTAL_PARTITIONS`    | `1`       | Number of partitions for multi-leader mode           |
-| `SCHEDULER_LOCK_ACQUIRE_DELAY`  | `50`      | Jitter between lock attempts (ms); even split is enforced by the fair-share cap, not this |
 
 ---
 
 ## 2. Database Setup
 
-The service uses Flyway for automatic schema migration. On first startup it will create the `scheduler_lease` and `scheduler_node` tables in the shared `ccedb` database.
+The service uses Flyway for automatic schema migration. On first startup it creates the `scheduler_lease` and `scheduler_scan_cursor` tables in the shared `ccedb` database.
 
 **Pre-requisites:**
 - The `ccedb` database must exist
 - The `step_instance` table (managed by Compliance Service) must exist
-- The service user needs `SELECT` on `step_instance` and full access to `scheduler_lease` and `scheduler_node`
+- The service user needs `SELECT` on `step_instance` and full access to `scheduler_lease` and `scheduler_scan_cursor`
 
 ```sql
 -- Minimal grants (if not using superuser)
 GRANT SELECT ON step_instance TO scheduler_user;
 GRANT ALL ON scheduler_lease TO scheduler_user;
-GRANT ALL ON scheduler_node TO scheduler_user;
+GRANT ALL ON scheduler_scan_cursor TO scheduler_user;
 GRANT USAGE ON SCHEMA public TO scheduler_user;
 ```
 
@@ -116,7 +114,6 @@ docker run -d \
   -e DB_USERNAME=scheduler_user \
   -e DB_PASSWORD=<secret> \
   -e KAFKA_BOOTSTRAP_SERVERS=kafka-host:9092 \
-  -e SCHEDULER_TOTAL_PARTITIONS=4 \
   -p 8083:8083 \
   openphc/cce-scheduler-service:1.0.0
 ```
@@ -149,9 +146,9 @@ kubectl apply -f deploy/k8s/
 
 ### Scaling
 
-- **Horizontal scaling**: Deploy N replicas. Each replica competes for partition locks using `pg_advisory_lock`, bounded to its fair share (`ceil(SCHEDULER_TOTAL_PARTITIONS / live-replicas)`). Set `SCHEDULER_TOTAL_PARTITIONS` ≥ replica count to give every replica work.
-- **Recommended**: `replicas = SCHEDULER_TOTAL_PARTITIONS` for one partition per replica.
-- **Self-rebalancing**: when a replica is added, over-provisioned replicas shed their surplus partitions within a few `SCHEDULER_LEADER_RETRY` cycles (≈5–10s) — no rolling restart needed. This requires the `scheduler_node` registry; all replicas must share the same database.
+- **HA (active/standby)**: Deploy 2+ replicas. Exactly one holds the advisory lock and scans; the rest stand by. If the leader dies, a standby acquires the lock on its next retry (≤ `SCHEDULER_LEADER_RETRY`, default 5s). This is HA, not horizontal throughput scaling — a single leader scans the whole table.
+- **Throughput** comes from the async batched producer and `SCHEDULER_BATCH_SIZE`, not from multiple active scanners. A single leader handles the expected volume comfortably.
+- **Stateless**: all coordination state is in PostgreSQL (the advisory lock + `scheduler_lease`); any replica can be replaced at any time.
 
 ### Resource Recommendations
 
@@ -180,25 +177,25 @@ kubectl apply -f deploy/k8s/
 
 | Metric                                    | Type    | Labels                   | Description                       |
 |-------------------------------------------|---------|--------------------------|-----------------------------------|
-| `scheduler.scan.duration`                 | Timer   | partition                | Scan cycle duration               |
-| `scheduler.scan.steps`                    | Counter | transitionType, partition| Steps found per scan              |
-| `scheduler.publish.success`               | Counter | transitionType, partition| Successfully published events     |
-| `scheduler.publish.failure`               | Counter | transitionType, partition| Failed publish attempts           |
-| `scheduler.cycle`                         | Counter | partition                | Total scheduler cycles            |
-| `leader.status`                           | Gauge   | partition                | 1 = leader, 0 = follower          |
+| `scheduler.scan.duration`                 | Timer   | —                        | Scan cycle duration               |
+| `scheduler.scan.steps`                    | Counter | transitionType           | Steps found per scan              |
+| `scheduler.publish.success`               | Counter | transitionType           | Successfully published events     |
+| `scheduler.publish.failure`               | Counter | transitionType           | Failed publish attempts           |
+| `scheduler.cycle`                         | Counter | —                        | Total scheduler cycles            |
+| `leader.status`                           | Gauge   | —                        | 1 = leader, 0 = standby           |
 
 ### Grafana Dashboard
 
 Import the metrics above into Grafana. Key panels:
 - Scan rate and duration (P50/P99)
 - Publish success vs failure ratio
-- Leader partition ownership heatmap
+- Leader status (which instance is active)
 - HikariCP connection pool utilization
 
 ### Logging
 
 Structured JSON logging. Key MDC fields:
-- `partition` — owned partition index
+- `leaderStatus` — `leader` or `standby`
 - `correlationId` — per-event trace ID (`sched-{type}-{prefix}-{timestamp}`)
 
 ---
@@ -218,9 +215,9 @@ Structured JSON logging. Key MDC fields:
 
 | Symptom                           | Likely Cause                        | Fix                                       |
 |-----------------------------------|-------------------------------------|-------------------------------------------|
-| No steps being published          | Leader election failed              | Check DB connectivity, advisory lock key  |
-| Duplicate events                  | Multiple instances same partition   | Verify `SCHEDULER_TOTAL_PARTITIONS`       |
-| High scan duration                | Large `step_instance` table         | Add indexes, reduce `BATCH_SIZE`          |
+| No steps being published          | No instance is leader               | Check DB connectivity + advisory lock key; confirm one instance is UP (leader) |
+| Duplicate events                  | Two instances both leader (lock not shared) | Ensure all replicas share the same DB and `SCHEDULER_LOCK_KEY` |
+| High scan duration                | Large `step_instance` table         | Add the partial threshold+id indexes, reduce `BATCH_SIZE` |
 | Kafka timeout errors              | Broker unreachable                  | Check `KAFKA_BOOTSTRAP_SERVERS`           |
 | Lease expired warnings            | Long GC pauses or DB latency        | Increase `SCHEDULER_LEASE_DURATION`       |
 | OOM killed                        | Memory limit too low                | Increase pod memory limit                 |

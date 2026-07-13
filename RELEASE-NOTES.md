@@ -15,35 +15,36 @@ Initial production release of the CCE Scheduler Service — a headless backgroun
 ## Features
 
 ### Core Engine
-- **Partitioned multi-leader architecture** — greedy partition acquisition via `pg_advisory_lock`
+- **Single-leader architecture** — one active leader scans the entire `step_instance` table; all other replicas stand by for fast failover
 - **Configurable scan loop** — `@Scheduled` fixedDelay with tunable interval and batch size
-- **Due step scanner** — partition-filtered queries with deterministic MD5-based hashing
-- **Transition publisher** — idempotent Kafka producer with correlation ID tracking
+- **Due step scanner** — keyset/seek cursor over `(threshold, id)` prevents re-scanning and re-publishing crossings already emitted
+- **Transition publisher** — idempotent Kafka producer, async batched publish (fire all sends per cycle, then await the batch), with correlation ID tracking
 
 ### Leader Election
-- PostgreSQL advisory lock-based leader election per partition
+- PostgreSQL advisory lock-based single-leader election (`pg_try_advisory_lock`)
 - Dedicated JDBC connection (outside connection pool) for lock stability
-- Lease-based heartbeat with configurable TTL
-- Thread-safe `LeaderState` record for atomic state reads
-- Jittered retry on lock acquisition failure
+- Lease-based heartbeat with configurable TTL, upserted to `scheduler_lease` for observability
+- Standbys report `UP` (healthy-but-not-leader) via the health indicator so all replicas stay ready for fast failover
 
 ### Kafka Integration
 - Idempotent producer (`enable.idempotence=true`, `acks=all`)
+- Async batched publishing — sends are fired without blocking, then the whole cycle's batch is awaited
 - Structured trigger events on `cce.scheduler.triggers` topic
-- Configurable timeouts: request (5s), delivery (15s), linger (50ms)
-- Correlation ID format: `sched-{transitionType}-{stepIdPrefix}-{timestamp}`
+- `batch.size`/`linger.ms` tuned to coalesce a scan cycle's sends
+- Correlation ID format: `sched-{transitionType}-{stepIdPrefix}`
 
 ### Observability
-- Micrometer + Prometheus metrics with partition tags
+- Micrometer + Prometheus metrics (no partition tags — single scan domain)
 - Cached metric instances (ConcurrentHashMap) to avoid recreation overhead
-- Leader status gauge per partition
+- Leader status gauge
 - Scan duration timer, step counter, publish success/failure counters
 - Spring Boot Actuator health probes (liveness + readiness)
 
 ### Data Management
-- Flyway-managed schema migrations
-- `scheduler_lease` table with partition index uniqueness constraint
-- HikariCP connection pool with leak detection (15s threshold)
+- Flyway-managed schema migrations (`V1__create_scheduler_lease.sql`, `V2__scheduler_scan_cursor.sql`)
+- `scheduler_lease` — single row keyed by `id = 0` (leader heartbeat)
+- `scheduler_scan_cursor` — single row keyed by `id = 0`, the `(threshold, id)` watermark
+- HikariCP connection pool sized for the single-leader model (min 2)
 
 ---
 
@@ -52,10 +53,10 @@ Initial production release of the CCE Scheduler Service — a headless backgroun
 All settings configurable via environment variables. See [Deployment Guide](docs/deployment-guide.md) for the full reference.
 
 Key defaults:
-- Scan interval: 5000ms
-- Batch size: 100
+- Scan interval: 10000ms
+- Batch size: 1000
 - Lease duration: 30s
-- Total partitions: 1 (single-leader mode)
+- Advisory lock key: 100001 (single-leader election)
 
 ---
 
@@ -86,14 +87,15 @@ docker build -t openphc/cce-scheduler-service:1.0.0 .
 
 | Version | Description              |
 |---------|--------------------------|
-| V1      | Create `scheduler_lease` table with default partition row |
+| V1      | Create `scheduler_lease` table (single row, `id = 0`) |
+| V2      | Create `scheduler_scan_cursor` table (single row, `id = 0`) and partial scan indexes on `step_instance` |
 
 ---
 
 ## Known Limitations
 
 - No REST API — communication is exclusively via Kafka and database polling
-- Partition rebalancing is greedy (not cooperative) — works best when replicas ≤ partitions
+- Single active leader — the whole scan/publish workload runs on one instance at a time; standbys add failover capacity, not throughput
 - Requires shared `ccedb` database with Compliance Service
 - Advisory locks are session-scoped — connection loss triggers leadership loss
 

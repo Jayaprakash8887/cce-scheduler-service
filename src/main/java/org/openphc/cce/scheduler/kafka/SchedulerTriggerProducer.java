@@ -9,7 +9,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 
 @Component
 @Slf4j
@@ -26,29 +25,37 @@ public class SchedulerTriggerProducer {
     }
 
     /**
-     * Publishes a trigger message synchronously with protocolInstanceId as the message key.
-     * Returns true on success, false on failure.
+     * Sends a trigger message <b>asynchronously</b> with protocolInstanceId as the message
+     * key, returning the in-flight future. The caller fires many of these and then awaits
+     * the batch, so the Kafka producer pipelines/batches the sends instead of paying one
+     * broker round-trip per message (the previous synchronous model).
      */
-    public boolean publish(UUID protocolInstanceId, SchedulerTriggerMessage message) {
+    public CompletableFuture<SendResult<String, Object>> publish(UUID protocolInstanceId,
+                                                                 SchedulerTriggerMessage message) {
         String key = protocolInstanceId.toString();
         try {
-            CompletableFuture<SendResult<String, Object>> future =
-                    kafkaTemplate.send(new ProducerRecord<>(topic, key, message));
-
-            SendResult<String, Object> result = future.get(5, TimeUnit.SECONDS);
-            log.debug("Published {} to partition {} offset {} — correlationId={}",
-                    message.transitionType(),
-                    result.getRecordMetadata().partition(),
-                    result.getRecordMetadata().offset(),
-                    message.correlationId());
-            return true;
+            return kafkaTemplate.send(new ProducerRecord<>(topic, key, message))
+                    .whenComplete((result, ex) -> {
+                        if (ex == null) {
+                            log.debug("Published {} to partition {} offset {} — correlationId={}",
+                                    message.transitionType(),
+                                    result.getRecordMetadata().partition(),
+                                    result.getRecordMetadata().offset(),
+                                    message.correlationId());
+                        } else {
+                            log.warn("Failed to publish {} for step {} — correlationId={}",
+                                    message.transitionType(),
+                                    message.stepInstanceId(),
+                                    message.correlationId(),
+                                    ex);
+                        }
+                    });
         } catch (Exception e) {
-            log.warn("Failed to publish {} for step {} — correlationId={}",
-                    message.transitionType(),
-                    message.stepInstanceId(),
-                    message.correlationId(),
-                    e);
-            return false;
+            // A synchronous failure (serialization, buffer exhaustion) must not break the
+            // caller's batch loop — surface it as a failed future like an async failure.
+            log.warn("Failed to submit publish for step {} — correlationId={}",
+                    message.stepInstanceId(), message.correlationId(), e);
+            return CompletableFuture.failedFuture(e);
         }
     }
 }

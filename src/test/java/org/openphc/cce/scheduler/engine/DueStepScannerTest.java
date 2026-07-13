@@ -22,6 +22,9 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -30,6 +33,9 @@ class DueStepScannerTest {
     @Mock
     private StepInstanceRepository stepInstanceRepository;
 
+    @Mock
+    private ScanCursorService scanCursor;
+
     private SchedulerProperties properties;
     private DueStepScanner scanner;
 
@@ -37,28 +43,28 @@ class DueStepScannerTest {
     void setUp() {
         properties = new SchedulerProperties();
         properties.setBatchSize(100);
-        scanner = new DueStepScanner(stepInstanceRepository, properties);
+        scanner = new DueStepScanner(stepInstanceRepository, properties, scanCursor);
+        lenient().when(scanCursor.readWatermark()).thenReturn(
+                new ScanCursorService.Watermark(
+                        ScanCursorService.BEGINNING, ScanCursorService.BEGINNING_ID));
     }
 
     @Test
     void scan_emptyResult_returnsEmptyList() {
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(Collections.emptyList());
 
-        List<DueStep> result = scanner.scan(0, 1);
-
-        assertThat(result).isEmpty();
+        assertThat(scanner.scan()).isEmpty();
     }
 
     @Test
     void scan_pendingStep_returnsPendingToDue() {
         StepInstance step = buildStepInstance(StepState.PENDING,
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
-
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
         assertThat(result).hasSize(1);
         DueStep dueStep = result.get(0);
@@ -72,13 +78,11 @@ class DueStepScannerTest {
     void scan_dueStep_returnsDueToOverdue() {
         OffsetDateTime overdueDate = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(30);
         StepInstance step = buildStepInstance(StepState.DUE, null, overdueDate, null);
-
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
-        assertThat(result).hasSize(1);
         assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.DUE_TO_OVERDUE);
         assertThat(result.get(0).thresholdDate()).isEqualTo(overdueDate);
     }
@@ -87,13 +91,11 @@ class DueStepScannerTest {
     void scan_overdueStep_returnsOverdueToMissed() {
         OffsetDateTime missedDate = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
         StepInstance step = buildStepInstance(StepState.OVERDUE, null, null, missedDate);
-
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
-        assertThat(result).hasSize(1);
         assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.OVERDUE_TO_MISSED);
         assertThat(result.get(0).thresholdDate()).isEqualTo(missedDate);
     }
@@ -102,13 +104,10 @@ class DueStepScannerTest {
     void scan_metadata_containsActionIdAndRepeatIndex() {
         StepInstance step = buildStepInstance(StepState.PENDING,
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
-
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
 
-        List<DueStep> result = scanner.scan(0, 1);
-
-        JsonNode metadata = result.get(0).metadata();
+        JsonNode metadata = scanner.scan().get(0).metadata();
         assertThat(metadata.get("actionId").asText()).isEqualTo("action-1");
         assertThat(metadata.get("repeatIndex").asInt()).isEqualTo(0);
         assertThat(metadata.get("currentState").asText()).isEqualTo("PENDING");
@@ -120,14 +119,10 @@ class DueStepScannerTest {
         StepInstance step = buildStepInstance(StepState.PENDING,
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
         setField(step, "requiredBehavior", "MUST");
-
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
 
-        List<DueStep> result = scanner.scan(0, 1);
-
-        JsonNode metadata = result.get(0).metadata();
-        assertThat(metadata.has("requiredBehavior")).isTrue();
+        JsonNode metadata = scanner.scan().get(0).metadata();
         assertThat(metadata.get("requiredBehavior").asText()).isEqualTo("MUST");
     }
 
@@ -135,14 +130,10 @@ class DueStepScannerTest {
     void scan_metadata_omitsRequiredBehaviorWhenNull() {
         StepInstance step = buildStepInstance(StepState.PENDING,
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
-
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
 
-        List<DueStep> result = scanner.scan(0, 1);
-
-        JsonNode metadata = result.get(0).metadata();
-        assertThat(metadata.has("requiredBehavior")).isFalse();
+        assertThat(scanner.scan().get(0).metadata().has("requiredBehavior")).isFalse();
     }
 
     @Test
@@ -153,11 +144,10 @@ class DueStepScannerTest {
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
         StepInstance overdue = buildStepInstance(StepState.OVERDUE, null, null,
                 OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(30));
-
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+        when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(pending, due, overdue));
 
-        List<DueStep> result = scanner.scan(0, 1);
+        List<DueStep> result = scanner.scan();
 
         assertThat(result).hasSize(3);
         assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.PENDING_TO_DUE);
@@ -166,17 +156,18 @@ class DueStepScannerTest {
     }
 
     @Test
-    void scan_passesPartitionParametersToRepository() {
-        when(stepInstanceRepository.findDueSteps(any(), anyInt(), anyInt(), anyInt()))
+    void scan_watermarkEnabled_passesReadWatermarkToRepository() {
+        OffsetDateTime watermark = OffsetDateTime.now(ZoneOffset.UTC).minusDays(1);
+        UUID watermarkId = UUID.randomUUID();
+        when(scanCursor.readWatermark())
+                .thenReturn(new ScanCursorService.Watermark(watermark, watermarkId));
+        when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(Collections.emptyList());
 
-        scanner.scan(3, 8);
+        scanner.scan();
 
-        org.mockito.Mockito.verify(stepInstanceRepository)
-                .findDueSteps(any(OffsetDateTime.class),
-                        org.mockito.ArgumentMatchers.eq(3),
-                        org.mockito.ArgumentMatchers.eq(8),
-                        org.mockito.ArgumentMatchers.eq(100));
+        verify(stepInstanceRepository).findDueSteps(
+                any(OffsetDateTime.class), eq(watermark), eq(watermarkId), eq(100));
     }
 
     private StepInstance buildStepInstance(StepState state,

@@ -21,20 +21,25 @@ public class DueStepScanner {
 
     private final StepInstanceRepository stepInstanceRepository;
     private final SchedulerProperties properties;
+    private final ScanCursorService scanCursor;
 
-    public DueStepScanner(StepInstanceRepository stepInstanceRepository, SchedulerProperties properties) {
+    public DueStepScanner(StepInstanceRepository stepInstanceRepository,
+                          SchedulerProperties properties,
+                          ScanCursorService scanCursor) {
         this.stepInstanceRepository = stepInstanceRepository;
         this.properties = properties;
+        this.scanCursor = scanCursor;
     }
 
-    public List<DueStep> scan(int partitionIndex, int totalPartitions) {
+    public List<DueStep> scan() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        ScanCursorService.Watermark watermark = scanCursor.readWatermark();
 
         List<StepInstance> dueSteps = stepInstanceRepository.findDueSteps(
-                now, partitionIndex, totalPartitions, properties.getBatchSize());
+                now, watermark.timestamp(), watermark.id(), properties.getBatchSize());
 
-        log.debug("Scanned partition {}/{} — found {} due steps",
-                partitionIndex, totalPartitions, dueSteps.size());
+        log.debug("Scanned — watermark=({},{}), found {} due steps",
+                watermark.timestamp(), watermark.id(), dueSteps.size());
 
         return dueSteps.stream()
                 .map(this::toDueStep)

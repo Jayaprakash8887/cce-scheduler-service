@@ -12,11 +12,13 @@ import org.openphc.cce.scheduler.config.ObservabilityConfig;
 import org.openphc.cce.scheduler.domain.model.enums.TransitionType;
 import org.openphc.cce.scheduler.engine.DueStep;
 import org.openphc.cce.scheduler.engine.TransitionPublisher;
+import org.springframework.kafka.support.SendResult;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -42,6 +44,16 @@ class SchedulerTriggerProducerTest {
         transitionPublisher = new TransitionPublisher(producer, metrics);
     }
 
+    private CompletableFuture<SendResult<String, Object>> ok() {
+        return CompletableFuture.completedFuture(null);
+    }
+
+    private CompletableFuture<SendResult<String, Object>> failed() {
+        CompletableFuture<SendResult<String, Object>> f = new CompletableFuture<>();
+        f.completeExceptionally(new RuntimeException("broker down"));
+        return f;
+    }
+
     @Test
     void publishAll_singleStep_publishesWithCorrectKey() {
         UUID stepId = UUID.randomUUID();
@@ -49,9 +61,9 @@ class SchedulerTriggerProducerTest {
         DueStep dueStep = new DueStep(stepId, protocolId, TransitionType.PENDING_TO_DUE,
                 OffsetDateTime.now(ZoneOffset.UTC), JsonNodeFactory.instance.objectNode());
 
-        when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(true);
+        when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(ok());
 
-        transitionPublisher.publishAll(List.of(dueStep), 0);
+        transitionPublisher.publishAll(List.of(dueStep));
 
         ArgumentCaptor<UUID> keyCaptor = ArgumentCaptor.forClass(UUID.class);
         ArgumentCaptor<SchedulerTriggerMessage> msgCaptor = ArgumentCaptor.forClass(SchedulerTriggerMessage.class);
@@ -69,9 +81,9 @@ class SchedulerTriggerProducerTest {
         DueStep dueStep = new DueStep(stepId, UUID.randomUUID(), TransitionType.DUE_TO_OVERDUE,
                 OffsetDateTime.now(ZoneOffset.UTC), JsonNodeFactory.instance.objectNode());
 
-        when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(true);
+        when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(ok());
 
-        transitionPublisher.publishAll(List.of(dueStep), 0);
+        transitionPublisher.publishAll(List.of(dueStep));
 
         ArgumentCaptor<SchedulerTriggerMessage> msgCaptor = ArgumentCaptor.forClass(SchedulerTriggerMessage.class);
         verify(producer).publish(any(), msgCaptor.capture());
@@ -89,9 +101,9 @@ class SchedulerTriggerProducerTest {
         DueStep step3 = new DueStep(UUID.randomUUID(), UUID.randomUUID(), TransitionType.OVERDUE_TO_MISSED,
                 OffsetDateTime.now(ZoneOffset.UTC), JsonNodeFactory.instance.objectNode());
 
-        when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(true);
+        when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(ok());
 
-        int result = transitionPublisher.publishAll(List.of(step1, step2, step3), 0);
+        int result = transitionPublisher.publishAll(List.of(step1, step2, step3));
 
         assertThat(result).isEqualTo(3);
         verify(producer, times(3)).publish(any(), any());
@@ -99,7 +111,7 @@ class SchedulerTriggerProducerTest {
 
     @Test
     void publishAll_emptyList_publishesNothing() {
-        int result = transitionPublisher.publishAll(List.of(), 0);
+        int result = transitionPublisher.publishAll(List.of());
 
         assertThat(result).isEqualTo(0);
         verify(producer, never()).publish(any(), any());
@@ -110,13 +122,13 @@ class SchedulerTriggerProducerTest {
         DueStep dueStep = new DueStep(UUID.randomUUID(), UUID.randomUUID(), TransitionType.PENDING_TO_DUE,
                 OffsetDateTime.now(ZoneOffset.UTC), JsonNodeFactory.instance.objectNode());
 
-        when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(false);
+        when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(failed());
 
-        int result = transitionPublisher.publishAll(List.of(dueStep), 0);
+        int result = transitionPublisher.publishAll(List.of(dueStep));
 
         assertThat(result).isEqualTo(0);
         double failureCount = meterRegistry.counter("cce.scheduler.publish.failure",
-                "transition_type", "PENDING_TO_DUE", "partition", "0").count();
+                "transition_type", "PENDING_TO_DUE").count();
         assertThat(failureCount).isEqualTo(1.0);
     }
 
@@ -125,12 +137,12 @@ class SchedulerTriggerProducerTest {
         DueStep dueStep = new DueStep(UUID.randomUUID(), UUID.randomUUID(), TransitionType.OVERDUE_TO_MISSED,
                 OffsetDateTime.now(ZoneOffset.UTC), JsonNodeFactory.instance.objectNode());
 
-        when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(true);
+        when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(ok());
 
-        transitionPublisher.publishAll(List.of(dueStep), 2);
+        transitionPublisher.publishAll(List.of(dueStep));
 
         double successCount = meterRegistry.counter("cce.scheduler.publish.success",
-                "transition_type", "OVERDUE_TO_MISSED", "partition", "2").count();
+                "transition_type", "OVERDUE_TO_MISSED").count();
         assertThat(successCount).isEqualTo(1.0);
     }
 
@@ -142,10 +154,10 @@ class SchedulerTriggerProducerTest {
                 OffsetDateTime.now(ZoneOffset.UTC), JsonNodeFactory.instance.objectNode());
 
         when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class)))
-                .thenReturn(true)
-                .thenReturn(false);
+                .thenReturn(ok())
+                .thenReturn(failed());
 
-        int result = transitionPublisher.publishAll(List.of(success, failure), 0);
+        int result = transitionPublisher.publishAll(List.of(success, failure));
 
         assertThat(result).isEqualTo(1);
     }
