@@ -34,6 +34,8 @@ spring:
       properties:
         enable.idempotence: true
         max.in.flight.requests.per.connection: 5
+        linger.ms: 50
+        batch.size: 262144
 ```
 
 | Setting | Value | Rationale |
@@ -42,6 +44,8 @@ spring:
 | `retries` | `3` | Retry on transient failures |
 | `enable.idempotence` | `true` | Exactly-once semantics within a partition |
 | `max.in.flight.requests.per.connection` | `5` | Max allowed with idempotent producer |
+| `linger.ms` | `50` | Small batching window so a scan cycle's fired sends coalesce |
+| `batch.size` | `262144` (256 KB) | Sized to hold ~one scan cycle's batch (`batch-size` msgs, ~256 B each) |
 
 **Publishing mode:** Asynchronous batched — within a scan cycle the Scheduler **fires all sends without blocking** (so the producer pipelines and batches them), then **awaits the whole batch** and tallies per-message success/failure. This lifts throughput for bursty cycles versus a send-then-block-per-message loop, while `enable.idempotence` + `acks=all` preserve ordering and de-duplicate producer retries within a partition.
 

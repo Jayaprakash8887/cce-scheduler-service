@@ -69,7 +69,7 @@ class LeaderElectionIntegrationTest {
             assertThat(election.getLastHeartbeat()).isNotNull();
             assertThat(election.getLeaseExpiresAt()).isNotNull();
 
-            Optional<SchedulerLease> lease = leaseRepository.findBySingleton(0);
+            Optional<SchedulerLease> lease = leaseRepository.findById(0);
             assertThat(lease).isPresent();
             assertThat(lease.get().getLeaderId()).isEqualTo(election.getLeaderId());
         } finally {

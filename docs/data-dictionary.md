@@ -8,41 +8,31 @@ Comprehensive reference for all database tables, entities, enums, Kafka message 
 
 ### 1.1 `scheduler_lease` — Leader Heartbeat
 
-Holds the current leader's heartbeat and lease expiry. With single-leader election, this table has a **single row** keyed by `singleton = 0`. The advisory lock — not this row — is the actual leadership mechanism; the row is heartbeat/observability bookkeeping updated by the current leader.
+Holds the current leader's heartbeat and lease expiry as a **single row keyed by `id = 0`** (upserted by the leader). The advisory lock — not this row — is the actual leadership mechanism; the row is write-only observability (the health indicator reads in-memory state, not this table).
 
-**Migration:** `V1__create_scheduler_lease.sql` (the singleton key column is re-keyed by `V3__scheduler_single_leader_schema.sql`)  
+**Migration:** `V1__create_scheduler_lease.sql`  
 **Owner:** Scheduler Service (read-write)
 
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
-| `id` | `UUID` | No | `gen_random_uuid()` | Primary key |
-| `singleton` | `INTEGER` | No | `0` | Singleton marker (always `0`) — one row |
+| `id` | `INTEGER` | No | — | Primary key — always `0` (single row). |
 | `leader_id` | `VARCHAR` | Yes | — | Instance ID (per-process UUID) of the current leader. `NULL` when no leader is active. |
-| `last_heartbeat` | `TIMESTAMPTZ` | Yes | — | Last time the leader updated this row. |
+| `last_heartbeat` | `TIMESTAMPTZ` | Yes | — | Last time the leader upserted this row. |
 | `lease_expires_at` | `TIMESTAMPTZ` | Yes | — | When the current lease expires. Computed as `last_heartbeat + leaseDurationSeconds`. |
 
 **Constraints:**
 - `PK`: `id`
-- `UNIQUE`: `singleton`
 
 ```sql
 CREATE TABLE scheduler_lease (
-    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    singleton        INTEGER NOT NULL DEFAULT 0,
+    id               INTEGER PRIMARY KEY,
     leader_id        VARCHAR,
     last_heartbeat   TIMESTAMPTZ,
-    lease_expires_at TIMESTAMPTZ,
-    CONSTRAINT uq_scheduler_lease_singleton UNIQUE (singleton)
+    lease_expires_at TIMESTAMPTZ
 );
-
-INSERT INTO scheduler_lease (id, singleton) VALUES (gen_random_uuid(), 0);
 ```
 
-### 1.2 `scheduler_node` — Removed
-
-This table was a live-instance registry from the earlier multi-instance model. Under single-leader election it is unused and is **dropped by `V3__scheduler_single_leader_schema.sql`** (it was created by `V2`).
-
-### 1.3 `scheduler_scan_cursor` — Scan Watermark
+### 1.2 `scheduler_scan_cursor` — Scan Watermark
 
 A **single-row** table (`id = 0`), holding the scan cursor as a **keyset/seek cursor over the composite key `(threshold, step_id)`** — the exclusive lower bound of the scan window. The scan considers only `step_instance` rows that sort **strictly after** `(watermark, watermark_id)` (i.e. `eff_threshold > watermark`, or `eff_threshold = watermark AND id > watermark_id`), and `SchedulerLoop` advances the cursor to the **last emitted** `(threshold, id)` after a **fully successful** publish cycle. This stops the scheduler from re-selecting and re-publishing the same threshold crossing on every cycle while a step's state is frozen (e.g., while the Compliance Service is lagging or down), which is the primary cause of duplicate events in `cce.scheduler.triggers`.
 
@@ -50,7 +40,7 @@ The `id` component (a **UUID v7** from the Compliance Service, as of its v4→v7
 
 Written only by the **current leader** (serialized by the advisory lock), so there is no cross-writer contention. The upsert's `WHERE ROW(new) > ROW(old)` guard makes the write monotonic in lexical `(timestamp, id)` order — a stale/clock-skewed value from a new owner after failover can never move the cursor backwards.
 
-**Migration:** `V3__scheduler_single_leader_schema.sql`  
+**Migration:** `V2__scheduler_scan_cursor.sql`  
 **Owner:** Scheduler Service (read-write)
 
 | Column | Type | Nullable | Default | Description |
@@ -74,7 +64,7 @@ CREATE TABLE scheduler_scan_cursor (
 
 > **Known gaps (accepted; addressed elsewhere):** (a) a step whose `(threshold, id)` sorts **below** the current cursor — backfill / backdated start / clock skew, or a late crossing at exactly the `watermark` instant with `id < watermark_id` — is never scanned; (b) a trigger published to Kafka but never applied by the Compliance Service is not re-driven (transient publish **failures** *are* retried, because the cursor advances only when every trigger in the cycle succeeds). The former same-timestamp-cohort truncation is **resolved** by the `(threshold, id)` keyset cursor.
 
-### 1.4 `step_instance` — Read-Only View (Owned by Compliance Service)
+### 1.3 `step_instance` — Read-Only View (Owned by Compliance Service)
 
 The Scheduler reads this table to find steps that need time-based transitions. **The Scheduler never writes to this table.**
 

@@ -28,15 +28,11 @@ CREATE TABLE IF NOT EXISTS step_instance (
 
 -- Scheduler owned tables
 CREATE TABLE IF NOT EXISTS scheduler_lease (
-    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    singleton        INTEGER NOT NULL DEFAULT 0,
+    id               INTEGER PRIMARY KEY,
     leader_id        VARCHAR,
     last_heartbeat   TIMESTAMPTZ,
-    lease_expires_at TIMESTAMPTZ,
-    CONSTRAINT uq_scheduler_lease_singleton UNIQUE (singleton)
+    lease_expires_at TIMESTAMPTZ
 );
-
-INSERT INTO scheduler_lease (id, singleton) VALUES (gen_random_uuid(), 0) ON CONFLICT (singleton) DO NOTHING;
 
 -- Scheduler scan watermark (single row)
 CREATE TABLE IF NOT EXISTS scheduler_scan_cursor (

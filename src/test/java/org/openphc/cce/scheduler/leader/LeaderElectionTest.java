@@ -14,11 +14,9 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -93,14 +91,12 @@ class LeaderElectionTest {
         when(stmt.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(true);
         when(rs.getBoolean(1)).thenReturn(true);
-        when(leaseRepository.findBySingleton(anyInt())).thenReturn(Optional.empty());
-        when(leaseRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         LeaderElection election = newElection();
         election.tryAcquireLeadership();
 
         assertThat(election.isLeader()).isTrue();
-        verify(leaseRepository).save(any());
+        verify(leaseRepository).upsertLease(any(), any(), any());
     }
 
     @Test
@@ -129,8 +125,6 @@ class LeaderElectionTest {
         when(stmt.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(true);
         when(rs.getBoolean(1)).thenReturn(true);
-        when(leaseRepository.findBySingleton(anyInt())).thenReturn(Optional.empty());
-        when(leaseRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         LeaderElection election = newElection();
         election.tryAcquireLeadership();

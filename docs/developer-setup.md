@@ -50,7 +50,7 @@ The Scheduler Service connects to the **same PostgreSQL database** (`ccedb`) as 
 2. **Use init script** — apply the Compliance Service schema manually before starting the Scheduler
 3. **Testcontainers** — integration tests include init scripts that create both schemas
 
-The Scheduler's own Flyway migrations create its tables: `scheduler_lease` (leader heartbeat) and `scheduler_scan_cursor` (the scan watermark). `V3__scheduler_single_leader_schema.sql` is the single-leader schema migration — it drops the legacy `scheduler_node` table (created by `V2`), re-keys the lease to a `singleton`, creates `scheduler_scan_cursor`, and adds guarded partial scan indexes on `step_instance` (`CREATE INDEX IF NOT EXISTS`).
+The Scheduler's own Flyway migrations create its tables: `V1__create_scheduler_lease.sql` (`scheduler_lease` — the leader heartbeat, a single row keyed by `id = 0`) and `V2__scheduler_scan_cursor.sql` (`scheduler_scan_cursor` — the scan watermark, plus guarded partial scan indexes on `step_instance` via `CREATE INDEX IF NOT EXISTS`).
 
 ### 2.4 Run the Application
 
@@ -144,7 +144,7 @@ management:
 | `DB_NAME` | `ccedb` | Shared database name (all CCE services) |
 | `DB_USERNAME` | `cce_user` | Database username (shared with Collector Service) |
 | `DB_PASSWORD` | `cce_pass` | Database password (shared with Collector Service) |
-| `DB_POOL_SIZE` | `5` | HikariCP max pool size |
+| `DB_POOL_SIZE` | `2` | HikariCP max pool size (single-leader model — one connection holds the advisory lock, the rest serve short scan/lease/cursor queries) |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka bootstrap servers |
 | `KAFKA_TOPIC_SCHEDULER_TRIGGERS` | `cce.scheduler.triggers` | Output Kafka topic |
 | `SCHEDULER_SCAN_INTERVAL` | `10000` | Scan interval in milliseconds |

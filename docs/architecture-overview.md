@@ -132,10 +132,8 @@ src/main/resources/
 ├── application.yml
 ├── application-docker.yml
 └── db/migration/
-    ├── V1__create_scheduler_lease.sql
-    ├── V2__create_scheduler_node.sql             # (legacy; dropped by V3)
-    └── V3__scheduler_single_leader_schema.sql    # drop node, re-key lease → singleton,
-                                                  # scheduler_scan_cursor, step_instance indexes
+    ├── V1__create_scheduler_lease.sql            # leader heartbeat (single row, id = 0)
+    └── V2__scheduler_scan_cursor.sql             # scan cursor + step_instance scan indexes
 
 src/test/java/org/openphc/cce/scheduler/      # Unit tests
 src/integrationTest/java/org/openphc/cce/scheduler/  # Integration tests
@@ -221,8 +219,6 @@ The Scheduler connects to the **same PostgreSQL database** (`ccedb`) as all othe
 | `scheduler_lease` | Scheduler Service | **Read-write** | Leader heartbeat + lease expiry (single row) |
 | `scheduler_scan_cursor` | Scheduler Service | **Read-write** | Scan watermark (single cursor) preventing re-emission of already-published crossings |
 | All other tables | Compliance Service | **No access** | Not used by Scheduler |
-
-> The `scheduler_node` table (a former live-instance registry from the multi-instance model) is dropped by migration `V3`.
 
 **Important:** The Scheduler uses `@Immutable` on its `StepInstance` entity to prevent accidental writes. The actual state transitions are performed by the Compliance Service after consuming `SchedulerTriggerMessage` from Kafka.
 

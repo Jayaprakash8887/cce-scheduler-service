@@ -41,7 +41,7 @@ All configuration is via environment variables. Defaults are suitable for local 
 
 ## 2. Database Setup
 
-The service uses Flyway for automatic schema migration. On first startup it creates the `scheduler_lease` and `scheduler_scan_cursor` tables in the shared `ccedb` database. (A legacy `scheduler_node` table is created by `V2` and dropped by `V3`.)
+The service uses Flyway for automatic schema migration. On first startup it creates the `scheduler_lease` and `scheduler_scan_cursor` tables in the shared `ccedb` database.
 
 **Pre-requisites:**
 - The `ccedb` database must exist

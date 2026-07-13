@@ -4,7 +4,6 @@ import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.openphc.cce.scheduler.config.SchedulerProperties;
-import org.openphc.cce.scheduler.domain.model.SchedulerLease;
 import org.openphc.cce.scheduler.domain.repository.SchedulerLeaseRepository;
 import org.slf4j.MDC;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -33,9 +32,6 @@ import java.util.concurrent.locks.ReentrantLock;
 @Component
 @Slf4j
 public class LeaderElection {
-
-    /** Singleton key of the one lease row this instance heartbeats when leader. */
-    private static final int LEASE_ROW = 0;
 
     private final SchedulerProperties properties;
     private final SchedulerLeaseRepository leaseRepository;
@@ -125,16 +121,7 @@ public class LeaderElection {
     }
 
     private void updateHeartbeat(OffsetDateTime now, OffsetDateTime expiresAt) {
-        SchedulerLease lease = leaseRepository.findBySingleton(LEASE_ROW)
-                .orElseGet(() -> {
-                    SchedulerLease newLease = new SchedulerLease();
-                    newLease.setSingleton(LEASE_ROW);
-                    return newLease;
-                });
-        lease.setLeaderId(leaderId);
-        lease.setLastHeartbeat(now);
-        lease.setLeaseExpiresAt(expiresAt);
-        leaseRepository.save(lease);
+        leaseRepository.upsertLease(leaderId, now, expiresAt);
     }
 
     private void ensureDedicatedConnection() throws SQLException {
