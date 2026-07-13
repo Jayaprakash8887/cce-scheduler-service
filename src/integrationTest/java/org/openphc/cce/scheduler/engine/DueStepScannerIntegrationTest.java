@@ -137,7 +137,7 @@ class DueStepScannerIntegrationTest {
     }
 
     @Test
-    void scan_singlePartition_returnsAllSteps() {
+    void scan_returnsAllDueSteps() {
         OffsetDateTime pastDue = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null, null);
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null, null);

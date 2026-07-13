@@ -1,32 +1,48 @@
--- Per-partition scan watermark (Logstash-style bookmark), as a keyset/seek
--- cursor over the composite key (threshold, step_id). The scan considers only
--- step_instance rows that sort strictly after (watermark, watermark_id) —
--- i.e. eff_threshold > watermark, or eff_threshold = watermark AND id > watermark_id.
--- SchedulerLoop advances the cursor to the last emitted (threshold, id) after a
--- fully successful publish cycle. Because id breaks threshold ties, a cohort of
--- steps sharing an identical threshold (e.g. calendar-date schedules, bulk
--- backfills) drains across cycles batch-size at a time — no truncation, no stall.
+-- Single-leader schema. One active leader (single advisory lock) scans the whole table.
+
+-- Retire the live-instance registry from the earlier multi-instance model.
+DROP TABLE IF EXISTS scheduler_node;
+
+-- The lease is a singleton (one leader). Re-key the legacy column created by V1.
+ALTER TABLE scheduler_lease RENAME COLUMN partition_index TO singleton;
+ALTER TABLE scheduler_lease RENAME CONSTRAINT uq_scheduler_lease_partition TO uq_scheduler_lease_singleton;
+
+-- Single-row scan cursor: a keyset/seek cursor over the composite key (threshold, step id).
+-- The scan considers only step_instance rows that sort strictly after (watermark, watermark_id)
+-- — i.e. eff_threshold > watermark, or eff_threshold = watermark AND id > watermark_id.
+-- SchedulerLoop advances it to the last emitted (threshold, id) after a fully successful
+-- publish cycle. The id (a UUID v7) breaks threshold ties so a same-instant cohort larger
+-- than batch-size drains across cycles instead of being truncated. Written only by the
+-- leader (serialized by the advisory lock).
 --
--- step_instance.id is a UUID v7 (time-ordered by creation), so within a
--- same-threshold cohort the id tie-break drains rows in creation order (FIFO),
--- and an index on (threshold, id) stays compact. NOTE: the id's embedded time is
--- CREATION time, not the threshold — so id is only a tie-breaker UNDER threshold,
--- never the primary cursor (creation order != due order would strand steps).
---
--- Written only by the partition's current owner (serialized by the advisory
--- lock), so no cross-writer contention.
---
--- KNOWN GAPS (accepted here, addressed elsewhere):
---   (a) A step whose (threshold, id) sorts below the current cursor (backfill /
---       backdated start / clock skew, or a late crossing at exactly the
---       watermark instant with id < watermark_id) is never scanned.
---   (b) A trigger that is published to Kafka but never applied by the
---       Compliance Service is not re-driven (state stays frozen below the
---       cursor). Transient publish FAILURES are still retried because the
---       cursor only advances when every trigger in the cycle succeeds.
-CREATE TABLE IF NOT EXISTS scheduler_partition_cursor (
-    partition_index INTEGER PRIMARY KEY,
-    watermark       TIMESTAMPTZ NOT NULL,
-    watermark_id    UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+-- KNOWN GAPS (accepted; addressed elsewhere):
+--   (a) A step whose (threshold, id) sorts below the current cursor (backfill / backdated
+--       start / clock skew, or a late crossing at exactly the watermark instant with
+--       id < watermark_id) is never scanned.
+--   (b) A trigger published to Kafka but never applied by the Compliance Service is not
+--       re-driven. Transient publish FAILURES are still retried because the cursor only
+--       advances when every trigger in the cycle succeeds.
+CREATE TABLE IF NOT EXISTS scheduler_scan_cursor (
+    id           INTEGER PRIMARY KEY,
+    watermark    TIMESTAMPTZ NOT NULL,
+    watermark_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Partial indexes supporting the watermark-bounded scan. Each matches a state branch of
+-- findDueSteps, ordered by that state's effective threshold then id, so the (threshold, id)
+-- keyset seek is fully index-ordered. step_instance is owned by the Compliance Service:
+-- guarded by a table-exists check (and CREATE INDEX IF NOT EXISTS) so this is idempotent and
+-- safe where step_instance is not present. Verify after deploy with:
+--   EXPLAIN (ANALYZE, BUFFERS) <the findDueSteps query>
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'step_instance') THEN
+        CREATE INDEX IF NOT EXISTS idx_step_instance_pending_due
+            ON step_instance (due_date, id) WHERE state = 'PENDING';
+        CREATE INDEX IF NOT EXISTS idx_step_instance_due_overdue
+            ON step_instance (overdue_date, id) WHERE state = 'DUE';
+        CREATE INDEX IF NOT EXISTS idx_step_instance_overdue_missed
+            ON step_instance (missed_date, id) WHERE state = 'OVERDUE';
+    END IF;
+END $$;

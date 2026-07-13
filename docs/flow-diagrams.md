@@ -111,7 +111,7 @@ CREATE INDEX idx_step_instance_due_overdue   ON step_instance (overdue_date, id)
 CREATE INDEX idx_step_instance_overdue_missed ON step_instance (missed_date, id) WHERE state = 'OVERDUE';
 ```
 
-These are created by migration `V6__step_instance_scan_indexes.sql` (guarded by a table-exists check, `CREATE INDEX IF NOT EXISTS`, so they coexist with any Compliance-side indexes). UUID v7 ids are sequential, so they stay compact (append-mostly inserts). Verify efficiency after deploy with `EXPLAIN (ANALYZE, BUFFERS)` on the scan query.
+These are created by migration `V3__scheduler_single_leader_schema.sql` (guarded by a table-exists check, `CREATE INDEX IF NOT EXISTS`, so they coexist with any Compliance-side indexes). UUID v7 ids are sequential, so they stay compact (append-mostly inserts). Verify efficiency after deploy with `EXPLAIN (ANALYZE, BUFFERS)` on the scan query.
 
 ---
 

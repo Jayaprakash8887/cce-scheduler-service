@@ -10,7 +10,7 @@ Comprehensive reference for all database tables, entities, enums, Kafka message 
 
 Holds the current leader's heartbeat and lease expiry. With single-leader election, this table has a **single row** keyed by `singleton = 0`. The advisory lock — not this row — is the actual leadership mechanism; the row is heartbeat/observability bookkeeping updated by the current leader.
 
-**Migration:** `V1__create_scheduler_lease.sql` (column `partition_index` renamed to `singleton` by `V5`)  
+**Migration:** `V1__create_scheduler_lease.sql` (the singleton key column is re-keyed by `V3__scheduler_single_leader_schema.sql`)  
 **Owner:** Scheduler Service (read-write)
 
 | Column | Type | Nullable | Default | Description |
@@ -40,7 +40,7 @@ INSERT INTO scheduler_lease (id, singleton) VALUES (gen_random_uuid(), 0);
 
 ### 1.2 `scheduler_node` — Removed
 
-This table was a live-instance registry used to size the fair-share of multiple logical partitions. With the move to a single logical partition + single-leader election, it is no longer used and is **dropped by migration `V4__drop_scheduler_node.sql`** (created by `V2`, dropped by `V4`).
+This table was a live-instance registry from the earlier multi-instance model. Under single-leader election it is unused and is **dropped by `V3__scheduler_single_leader_schema.sql`** (it was created by `V2`).
 
 ### 1.3 `scheduler_scan_cursor` — Scan Watermark
 
@@ -50,7 +50,7 @@ The `id` component (a **UUID v7** from the Compliance Service, as of its v4→v7
 
 Written only by the **current leader** (serialized by the advisory lock), so there is no cross-writer contention. The upsert's `WHERE ROW(new) > ROW(old)` guard makes the write monotonic in lexical `(timestamp, id)` order — a stale/clock-skewed value from a new owner after failover can never move the cursor backwards.
 
-**Migration:** `V3__create_scheduler_partition_cursor.sql` (table renamed to `scheduler_scan_cursor`, column `partition_index` → `id`, by `V5`)  
+**Migration:** `V3__scheduler_single_leader_schema.sql`  
 **Owner:** Scheduler Service (read-write)
 
 | Column | Type | Nullable | Default | Description |

@@ -39,7 +39,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * End-to-end tests for the single-leader, single-partition pipeline using mocks:
+ * End-to-end tests for the single-leader pipeline using mocks:
  * leader guard → scan → async publish → metrics.
  */
 @ExtendWith(MockitoExtension.class)

@@ -133,11 +133,9 @@ src/main/resources/
 ├── application-docker.yml
 └── db/migration/
     ├── V1__create_scheduler_lease.sql
-    ├── V2__create_scheduler_node.sql             # (legacy; dropped by V4)
-    ├── V3__create_scheduler_partition_cursor.sql # (renamed → scheduler_scan_cursor by V5)
-    ├── V4__drop_scheduler_node.sql
-    ├── V5__rename_partition_to_scan.sql          # scheduler_scan_cursor + lease.singleton
-    └── V6__step_instance_scan_indexes.sql        # partial (threshold, id) indexes
+    ├── V2__create_scheduler_node.sql             # (legacy; dropped by V3)
+    └── V3__scheduler_single_leader_schema.sql    # drop node, re-key lease → singleton,
+                                                  # scheduler_scan_cursor, step_instance indexes
 
 src/test/java/org/openphc/cce/scheduler/      # Unit tests
 src/integrationTest/java/org/openphc/cce/scheduler/  # Integration tests
@@ -178,7 +176,7 @@ The core loop runs on a `@Scheduled(fixedDelay)` cadence (default: 10 seconds). 
 
 ### 4.2 Single-Leader Election Lifecycle
 
-The service runs a **single logical partition** scanned by a **single active leader**; all other instances are hot standbys. Leadership is a single PostgreSQL **session-level advisory lock**.
+A **single active leader** scans the whole `step_instance` table; all other instances are hot standbys. Leadership is a single PostgreSQL **session-level advisory lock**.
 
 #### Why the advisory lock?
 
@@ -224,7 +222,7 @@ The Scheduler connects to the **same PostgreSQL database** (`ccedb`) as all othe
 | `scheduler_scan_cursor` | Scheduler Service | **Read-write** | Scan watermark (single cursor) preventing re-emission of already-published crossings |
 | All other tables | Compliance Service | **No access** | Not used by Scheduler |
 
-> The `scheduler_node` table (a former fair-share registry) is dropped by migration `V4`.
+> The `scheduler_node` table (a former live-instance registry from the multi-instance model) is dropped by migration `V3`.
 
 **Important:** The Scheduler uses `@Immutable` on its `StepInstance` entity to prevent accidental writes. The actual state transitions are performed by the Compliance Service after consuming `SchedulerTriggerMessage` from Kafka.
 
@@ -289,7 +287,7 @@ leaderStatus: leader
 
 ### 8.1 Single-Leader (Active/Standby) Model
 
-The Scheduler runs one active leader with any number of hot standbys — HA without horizontal throughput partitioning.
+The Scheduler runs one active leader with any number of hot standbys — HA without horizontal throughput scaling.
 
 - **HA:** Deploy 2+ replicas. One holds the advisory lock and scans; the rest stand by. If the leader dies, a standby acquires the lock on its next retry (≤ `leaderRetryInterval`, default 5s).
 - **No StatefulSet required** — a regular Kubernetes Deployment. Leadership is dynamic via the advisory lock; all state is in PostgreSQL.

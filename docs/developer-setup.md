@@ -50,7 +50,7 @@ The Scheduler Service connects to the **same PostgreSQL database** (`ccedb`) as 
 2. **Use init script** — apply the Compliance Service schema manually before starting the Scheduler
 3. **Testcontainers** — integration tests include init scripts that create both schemas
 
-The Scheduler's own Flyway migrations create its tables: `scheduler_lease` (leader heartbeat) and `scheduler_scan_cursor` (the scan watermark; created as `scheduler_partition_cursor` by `V3`, renamed by `V5`). A legacy `scheduler_node` table is created by `V2` and dropped by `V4`. `V6` adds partial scan indexes on `step_instance` (guarded, `IF NOT EXISTS`).
+The Scheduler's own Flyway migrations create its tables: `scheduler_lease` (leader heartbeat) and `scheduler_scan_cursor` (the scan watermark). `V3__scheduler_single_leader_schema.sql` is the single-leader schema migration — it drops the legacy `scheduler_node` table (created by `V2`), re-keys the lease to a `singleton`, creates `scheduler_scan_cursor`, and adds guarded partial scan indexes on `step_instance` (`CREATE INDEX IF NOT EXISTS`).
 
 ### 2.4 Run the Application
 
