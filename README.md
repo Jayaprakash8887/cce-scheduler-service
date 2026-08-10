@@ -8,13 +8,12 @@ A headless background service within the CCE platform that drives **time-based s
 
 ## Overview
 
-The Scheduler detects when clinical protocol steps become **DUE**, **OVERDUE**, or **MISSED** based on configured date thresholds, and notifies the Compliance Service to perform the actual state transitions.
+The Scheduler detects when clinical protocol steps become **DUE** or **MISSED** based on configured date thresholds, and notifies the Compliance Service to perform the actual state transitions.
 
 | Transition | Condition |
 |---|---|
 | `PENDING → DUE` | `due_date ≤ now` |
-| `DUE → OVERDUE` | `overdue_date ≤ now` |
-| `OVERDUE → MISSED` | `missed_date ≤ now` |
+| `DUE → MISSED` | `missed_date ≤ now` |
 
 ### Key Characteristics
 

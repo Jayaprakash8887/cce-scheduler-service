@@ -105,10 +105,10 @@ class SchedulerEndToEndIntegrationTest {
         }
 
         @Test
-        @DisplayName("DUE step → DUE_TO_OVERDUE published")
-        void dueStep_publishesDueToOverdue() {
+        @DisplayName("DUE step → DUE_TO_MISSED published")
+        void dueStep_publishesDueToMissed() {
             when(leaderElection.isLeader()).thenReturn(true);
-            DueStep step = dueStep(TransitionType.DUE_TO_OVERDUE);
+            DueStep step = dueStep(TransitionType.DUE_TO_MISSED);
             when(dueStepScanner.scan()).thenReturn(List.of(step));
             when(triggerProducer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(ok());
 
@@ -116,22 +116,7 @@ class SchedulerEndToEndIntegrationTest {
 
             ArgumentCaptor<SchedulerTriggerMessage> msgCaptor = ArgumentCaptor.forClass(SchedulerTriggerMessage.class);
             verify(triggerProducer).publish(eq(step.protocolInstanceId()), msgCaptor.capture());
-            assertThat(msgCaptor.getValue().transitionType()).isEqualTo(TransitionType.DUE_TO_OVERDUE);
-        }
-
-        @Test
-        @DisplayName("OVERDUE step → OVERDUE_TO_MISSED published")
-        void overdueStep_publishesOverdueToMissed() {
-            when(leaderElection.isLeader()).thenReturn(true);
-            DueStep step = dueStep(TransitionType.OVERDUE_TO_MISSED);
-            when(dueStepScanner.scan()).thenReturn(List.of(step));
-            when(triggerProducer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(ok());
-
-            schedulerLoop.executeCycle();
-
-            ArgumentCaptor<SchedulerTriggerMessage> msgCaptor = ArgumentCaptor.forClass(SchedulerTriggerMessage.class);
-            verify(triggerProducer).publish(eq(step.protocolInstanceId()), msgCaptor.capture());
-            assertThat(msgCaptor.getValue().transitionType()).isEqualTo(TransitionType.OVERDUE_TO_MISSED);
+            assertThat(msgCaptor.getValue().transitionType()).isEqualTo(TransitionType.DUE_TO_MISSED);
         }
 
         @Test

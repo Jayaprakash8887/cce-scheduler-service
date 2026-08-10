@@ -77,19 +77,17 @@ flowchart TD
 flowchart TD
     A["DueStepScanner.scan()"] --> A2["Read cursor (W, Wid)<br/>(epoch + min-UUID if no row)"]
     A2 --> B["Query PostgreSQL (whole table)"]
-    B --> C["SELECT steps WHERE<br/>threshold ≤ now AND (threshold, id) > (W, Wid)<br/>evaluated per state (PENDING→dueDate,<br/>DUE→overdueDate, OVERDUE→missedDate)<br/>ORDER BY threshold ASC, id ASC<br/>LIMIT batchSize"]
+    B --> C["SELECT steps WHERE<br/>threshold ≤ now AND (threshold, id) > (W, Wid)<br/>evaluated per state (PENDING→dueDate,<br/>DUE→missedDate)<br/>ORDER BY threshold ASC, id ASC<br/>LIMIT batchSize"]
     C --> D{"Results empty?"}
     D -->|"Yes"| E["Return empty list"]
     D -->|"No"| F["For each StepInstance"]
 
     F --> G{"Current state?"}
     G -->|"PENDING"| H["transitionType = PENDING_TO_DUE"]
-    G -->|"DUE"| I["transitionType = DUE_TO_OVERDUE"]
-    G -->|"OVERDUE"| J["transitionType = OVERDUE_TO_MISSED"]
+    G -->|"DUE"| I["transitionType = DUE_TO_MISSED"]
 
     H --> K["Create DueStep record"]
     I --> K
-    J --> K
 
     K --> L{"More steps?"}
     L -->|"Yes"| F
@@ -106,12 +104,11 @@ flowchart TD
 `step_instance` is owned by the Compliance Service; the Scheduler reads it. To keep the watermark-bounded scan efficient as the table grows, the ideal supporting indexes are **partial indexes on each threshold column with `id` as a trailing column**, so the `(threshold, id)` keyset seek is fully index-ordered:
 
 ```sql
-CREATE INDEX idx_step_instance_pending_due   ON step_instance (due_date, id)     WHERE state = 'PENDING';
-CREATE INDEX idx_step_instance_due_overdue   ON step_instance (overdue_date, id) WHERE state = 'DUE';
-CREATE INDEX idx_step_instance_overdue_missed ON step_instance (missed_date, id) WHERE state = 'OVERDUE';
+CREATE INDEX idx_step_instance_pending_due ON step_instance (due_date, id)    WHERE state = 'PENDING';
+CREATE INDEX idx_step_instance_due_missed  ON step_instance (missed_date, id) WHERE state = 'DUE';
 ```
 
-These are created by migration `V2__scheduler_scan_cursor.sql` (guarded by a table-exists check, `CREATE INDEX IF NOT EXISTS`, so they coexist with any Compliance-side indexes). UUID v7 ids are sequential, so they stay compact (append-mostly inserts). Verify efficiency after deploy with `EXPLAIN (ANALYZE, BUFFERS)` on the scan query.
+These are created by migrations `V2__scheduler_scan_cursor.sql` and `V3__due_to_missed_indexes.sql` — V3 realigns them with the removal of `DUE → OVERDUE`, dropping the now-unmatched `idx_step_instance_due_overdue` (DUE/`overdue_date`) and `idx_step_instance_overdue_missed` (OVERDUE/`missed_date`). Both are guarded by a table-exists check and `IF EXISTS` / `IF NOT EXISTS`, so they coexist with any Compliance-side indexes. UUID v7 ids are sequential, so they stay compact (append-mostly inserts). Verify efficiency after deploy with `EXPLAIN (ANALYZE, BUFFERS)` on the scan query.
 
 ---
 
@@ -121,24 +118,20 @@ These are created by migration `V2__scheduler_scan_cursor.sql` (guarded by a tab
 graph LR
     subgraph "Time-Based (Scheduler)"
         P["PENDING"] -->|"dueDate ≤ now"| D["DUE"]
-        D -->|"overdueDate ≤ now"| O["OVERDUE"]
-        O -->|"missedDate ≤ now"| M["MISSED"]
+        D -->|"missedDate ≤ now"| M["MISSED"]
     end
 
     subgraph "Event-Based (Compliance Service)"
         P2["PENDING"] -->|"Event match"| C["COMPLETED"]
         D2["DUE"] -->|"Event match"| C2["COMPLETED"]
-        O2["OVERDUE"] -->|"Event match"| C3["COMPLETED"]
-        O3["OVERDUE"] -->|"Optional step<br/>auto-skip"| S["SKIPPED"]
+        D3["DUE"] -->|"Optional step<br/>auto-skip"| S["SKIPPED"]
     end
 
     style P fill:#3498DB,color:white
     style D fill:#F39C12,color:white
-    style O fill:#E74C3C,color:white
     style M fill:#7F8C8D,color:white
     style C fill:#27AE60,color:white
     style C2 fill:#27AE60,color:white
-    style C3 fill:#27AE60,color:white
     style S fill:#95A5A6,color:white
 ```
 

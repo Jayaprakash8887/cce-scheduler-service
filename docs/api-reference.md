@@ -92,8 +92,7 @@ cce_scheduler_scan_duration_seconds_sum 3.456
 # HELP cce_scheduler_scan_steps_total Steps found per transition type
 # TYPE cce_scheduler_scan_steps_total counter
 cce_scheduler_scan_steps_total{transition_type="PENDING_TO_DUE"} 45.0
-cce_scheduler_scan_steps_total{transition_type="DUE_TO_OVERDUE"} 12.0
-cce_scheduler_scan_steps_total{transition_type="OVERDUE_TO_MISSED"} 3.0
+cce_scheduler_scan_steps_total{transition_type="DUE_TO_MISSED"} 12.0
 
 # HELP cce_scheduler_publish_success_total Successful Kafka publishes
 # TYPE cce_scheduler_publish_success_total counter

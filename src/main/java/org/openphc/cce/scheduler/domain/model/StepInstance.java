@@ -41,9 +41,6 @@ public class StepInstance {
     @Column(name = "due_date")
     private OffsetDateTime dueDate;
 
-    @Column(name = "overdue_date")
-    private OffsetDateTime overdueDate;
-
     @Column(name = "missed_date")
     private OffsetDateTime missedDate;
 

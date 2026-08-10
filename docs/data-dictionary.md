@@ -36,7 +36,7 @@ CREATE TABLE scheduler_lease (
 
 A **single-row** table (`id = 0`), holding the scan cursor as a **keyset/seek cursor over the composite key `(threshold, step_id)`** — the exclusive lower bound of the scan window. The scan considers only `step_instance` rows that sort **strictly after** `(watermark, watermark_id)` (i.e. `eff_threshold > watermark`, or `eff_threshold = watermark AND id > watermark_id`), and `SchedulerLoop` advances the cursor to the **last emitted** `(threshold, id)` after a **fully successful** publish cycle. This stops the scheduler from re-selecting and re-publishing the same threshold crossing on every cycle while a step's state is frozen (e.g., while the Compliance Service is lagging or down), which is the primary cause of duplicate events in `cce.scheduler.triggers`.
 
-The `id` component (a **UUID v7** from the Compliance Service, as of its v4→v7 change) breaks threshold ties, so a cohort of steps sharing an **identical threshold** (calendar-date schedules, bulk backfills) drains across cycles `batch-size` at a time — no truncation, no stall — and, because v7 is time-ordered by creation, in creation (FIFO) order. Note the id is only a **tie-breaker under `threshold`**, never the primary cursor: a v7 id encodes *creation* time, not the due/overdue/missed threshold, so ordering by id alone would strand later-due-but-earlier-created steps. Correctness needs only a **total order** over `id`, which Postgres's `uuid` type provides for any version — so pre-change **v4** rows and post-change **v7** rows coexist safely (the FIFO-within-cohort property just applies to the v7 rows).
+The `id` component (a **UUID v7** from the Compliance Service, as of its v4→v7 change) breaks threshold ties, so a cohort of steps sharing an **identical threshold** (calendar-date schedules, bulk backfills) drains across cycles `batch-size` at a time — no truncation, no stall — and, because v7 is time-ordered by creation, in creation (FIFO) order. Note the id is only a **tie-breaker under `threshold`**, never the primary cursor: a v7 id encodes *creation* time, not the due/missed threshold, so ordering by id alone would strand later-due-but-earlier-created steps. Correctness needs only a **total order** over `id`, which Postgres's `uuid` type provides for any version — so pre-change **v4** rows and post-change **v7** rows coexist safely (the FIFO-within-cohort property just applies to the v7 rows).
 
 Written only by the **current leader** (serialized by the advisory lock), so there is no cross-writer contention. The upsert's `WHERE ROW(new) > ROW(old)` guard makes the write monotonic in lexical `(timestamp, id)` order — a stale/clock-skewed value from a new owner after failover can never move the cursor backwards.
 
@@ -76,17 +76,17 @@ The Scheduler reads this table to find steps that need time-based transitions. *
 | `repeat_index` | `INTEGER` | No | 0-based recurrence index |
 | `state` | `VARCHAR` | No | Current state — see `StepState` enum |
 | `due_date` | `TIMESTAMPTZ` | Yes | When the step becomes DUE |
-| `overdue_date` | `TIMESTAMPTZ` | Yes | When the step becomes OVERDUE (due_date + tolerance) |
+| `overdue_date` | `TIMESTAMPTZ` | Yes | Legacy column (due_date + tolerance). **Not read by the Scheduler** — the `DUE → OVERDUE` transition has been removed. |
 | `missed_date` | `TIMESTAMPTZ` | Yes | When the step becomes MISSED |
 | `completed_at` | `TIMESTAMPTZ` | Yes | When the step was completed (event-driven) |
 | `completed_by_source` | `VARCHAR` | Yes | Source system that completed the step |
 | `completion_status` | `VARCHAR` | Yes | `EARLY`, `ON_TIME`, or `LATE` |
 | `matched_event_id` | `UUID` | Yes | event_log ID of the completing event |
-| `required_behavior` | `VARCHAR` | Yes | FHIR `requiredBehavior` code: `must`, `could`, or `must-unless-documented`. Determines MISSED vs SKIPPED on `OVERDUE_TO_MISSED`. |
+| `required_behavior` | `VARCHAR` | Yes | FHIR `requiredBehavior` code: `must`, `could`, or `must-unless-documented`. Determines MISSED vs SKIPPED on `DUE_TO_MISSED`. |
 | `created_at` | `TIMESTAMPTZ` | No | When the step was instantiated |
 | `updated_at` | `TIMESTAMPTZ` | No | Last state change |
 
-**Scheduler Query Interest:** Only columns `id`, `protocol_instance_id`, `state`, `due_date`, `overdue_date`, `missed_date`, `required_behavior` are used by the Scheduler's scan query.
+**Scheduler Query Interest:** Only columns `id`, `protocol_instance_id`, `state`, `due_date`, `missed_date`, `required_behavior` are used by the Scheduler's scan query.
 
 ---
 
@@ -94,13 +94,13 @@ The Scheduler reads this table to find steps that need time-based transitions. *
 
 ### 2.1 `StepState`
 
-State of a step instance in its lifecycle. The Scheduler only queries for `PENDING`, `DUE`, and `OVERDUE` states.
+State of a step instance in its lifecycle. The Scheduler only queries for `PENDING` and `DUE` states.
 
 | Value | Description | Scheduler Relevant? |
 |-------|-------------|---------------------|
 | `PENDING` | Step created but not yet due | Yes — transitions to `DUE` when `due_date ≤ now` |
-| `DUE` | Step is now actionable | Yes — transitions to `OVERDUE` when `overdue_date ≤ now` |
-| `OVERDUE` | Step is past tolerance window | Yes — transitions to `MISSED` when `missed_date ≤ now` |
+| `DUE` | Step is now actionable | Yes — transitions to `MISSED` when `missed_date ≤ now` |
+| `OVERDUE` | **Legacy — no longer part of the lifecycle.** The `DUE → OVERDUE` transition has been removed; the Scheduler never scans this state and never moves a step into it. Rows written before the change may still carry it. | No |
 | `MISSED` | Step was never completed (terminal) | No — terminal state |
 | `COMPLETED` | Step was completed by an event (terminal) | No — terminal state |
 | `SKIPPED` | Step was skipped (optional steps only) | No — terminal state |
@@ -112,8 +112,7 @@ The type of time-based transition the Scheduler requests.
 | Value | From State | To State | Condition |
 |-------|-----------|----------|-----------|
 | `PENDING_TO_DUE` | `PENDING` | `DUE` | `due_date ≤ now` |
-| `DUE_TO_OVERDUE` | `DUE` | `OVERDUE` | `overdue_date ≤ now` |
-| `OVERDUE_TO_MISSED` | `OVERDUE` | `MISSED` or `SKIPPED` | `missed_date ≤ now`. Compliance Service applies `MISSED` for `must` steps (with deviation) or `SKIPPED` for `could` steps (no deviation). |
+| `DUE_TO_MISSED` | `DUE` | `MISSED` or `SKIPPED` | `missed_date ≤ now`. Compliance Service applies `MISSED` for `must` steps (with deviation) or `SKIPPED` for `could` steps (no deviation). |
 
 ---
 
@@ -126,7 +125,7 @@ Published to `cce.scheduler.triggers` topic.
 | Field | Type | Nullable | Description |
 |-------|------|----------|-------------|
 | `stepInstanceId` | `UUID` (String) | No | The `step_instance.id` that needs a state transition |
-| `transitionType` | `String` | No | One of: `PENDING_TO_DUE`, `DUE_TO_OVERDUE`, `OVERDUE_TO_MISSED` |
+| `transitionType` | `String` | No | One of: `PENDING_TO_DUE`, `DUE_TO_MISSED` |
 | `triggeredAt` | `OffsetDateTime` (ISO 8601) | No | When the scan cycle detected the threshold crossing |
 | `correlationid` | `String` | No | Distributed tracing ID — format: `sched-{transitionType}-{stepId-prefix}` (lowercase per CloudEvents convention) |
 

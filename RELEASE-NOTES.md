@@ -89,6 +89,23 @@ docker build -t openphc/cce-scheduler-service:1.0.0 .
 |---------|--------------------------|
 | V1      | Create `scheduler_lease` table (single row, `id = 0`) |
 | V2      | Create `scheduler_scan_cursor` table (single row, `id = 0`) and partial scan indexes on `step_instance` |
+| V3      | Realign the partial scan indexes with the removal of `DUE → OVERDUE` — drop `idx_step_instance_due_overdue` and `idx_step_instance_overdue_missed`, create `idx_step_instance_due_missed` |
+
+---
+
+## Breaking Changes
+
+### `DUE → OVERDUE` transition removed
+
+The `OVERDUE` state is no longer part of the scheduler-driven lifecycle. A step now goes **`PENDING → DUE → MISSED`**: the scan evaluates `DUE` rows against `missed_date` (previously `overdue_date`), and `overdue_date` is no longer read at all.
+
+| Before | After |
+|---|---|
+| `PENDING_TO_DUE`, `DUE_TO_OVERDUE`, `OVERDUE_TO_MISSED` | `PENDING_TO_DUE`, `DUE_TO_MISSED` |
+
+**Impact on consumers:** `cce.scheduler.triggers` no longer carries `DUE_TO_OVERDUE` or `OVERDUE_TO_MISSED`. The Compliance Service must handle `DUE_TO_MISSED` — applying `MISSED` (with deviation) for `must` steps and `SKIPPED` for `could` steps, the outcome previously driven by `OVERDUE_TO_MISSED`.
+
+**Rows already in `OVERDUE`:** never scanned and never advanced by the Scheduler. Any pre-existing `OVERDUE` rows need a one-off Compliance-side reconciliation; the `StepState.OVERDUE` constant is retained only so such rows still map when loaded.
 
 ---
 

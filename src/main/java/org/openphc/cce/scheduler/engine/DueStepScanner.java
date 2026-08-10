@@ -63,8 +63,7 @@ public class DueStepScanner {
     private OffsetDateTime resolveThresholdDate(StepInstance step) {
         return switch (step.getState()) {
             case PENDING -> step.getDueDate();
-            case DUE -> step.getOverdueDate();
-            case OVERDUE -> step.getMissedDate();
+            case DUE -> step.getMissedDate();
             default -> throw new IllegalStateException(
                     "Unexpected state in due step scan: " + step.getState());
         };

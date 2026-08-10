@@ -70,7 +70,7 @@ class DueStepScannerIntegrationTest {
     void scan_pendingStepWithPastDueDate_returnsPendingToDue() {
         UUID protocolId = UUID.randomUUID();
         insertStep(UUID.randomUUID(), protocolId, "PENDING",
-                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
 
         List<DueStep> result = scanner.scan();
 
@@ -80,36 +80,44 @@ class DueStepScannerIntegrationTest {
     }
 
     @Test
-    void scan_dueStepWithPastOverdueDate_returnsDueToOverdue() {
+    void scan_dueStepWithPastMissedDate_returnsDueToMissed() {
         UUID protocolId = UUID.randomUUID();
         insertStep(UUID.randomUUID(), protocolId, "DUE",
-                OffsetDateTime.now(ZoneOffset.UTC).minusDays(1),
-                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
-
-        List<DueStep> result = scanner.scan();
-
-        assertThat(result).hasSize(1);
-        assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.DUE_TO_OVERDUE);
-    }
-
-    @Test
-    void scan_overdueStepWithPastMissedDate_returnsOverdueToMissed() {
-        UUID protocolId = UUID.randomUUID();
-        insertStep(UUID.randomUUID(), protocolId, "OVERDUE",
-                OffsetDateTime.now(ZoneOffset.UTC).minusDays(2),
                 OffsetDateTime.now(ZoneOffset.UTC).minusDays(1),
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1));
 
         List<DueStep> result = scanner.scan();
 
         assertThat(result).hasSize(1);
-        assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.OVERDUE_TO_MISSED);
+        assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.DUE_TO_MISSED);
+    }
+
+    @Test
+    void scan_dueStepWithFutureMissedDate_notReturned() {
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "DUE",
+                OffsetDateTime.now(ZoneOffset.UTC).minusDays(1),
+                OffsetDateTime.now(ZoneOffset.UTC).plusHours(1));
+
+        List<DueStep> result = scanner.scan();
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void scan_legacyOverdueStep_neverReturned() {
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "OVERDUE",
+                OffsetDateTime.now(ZoneOffset.UTC).minusDays(2),
+                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1));
+
+        List<DueStep> result = scanner.scan();
+
+        assertThat(result).isEmpty();
     }
 
     @Test
     void scan_completedStep_neverReturned() {
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "COMPLETED",
-                OffsetDateTime.now(ZoneOffset.UTC).minusDays(1), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).minusDays(1), null);
 
         List<DueStep> result = scanner.scan();
 
@@ -119,7 +127,7 @@ class DueStepScannerIntegrationTest {
     @Test
     void scan_skippedStep_neverReturned() {
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "SKIPPED",
-                OffsetDateTime.now(ZoneOffset.UTC).minusDays(1), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).minusDays(1), null);
 
         List<DueStep> result = scanner.scan();
 
@@ -129,7 +137,7 @@ class DueStepScannerIntegrationTest {
     @Test
     void scan_pendingStepWithFutureDueDate_notReturned() {
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING",
-                OffsetDateTime.now(ZoneOffset.UTC).plusHours(1), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).plusHours(1), null);
 
         List<DueStep> result = scanner.scan();
 
@@ -139,9 +147,9 @@ class DueStepScannerIntegrationTest {
     @Test
     void scan_returnsAllDueSteps() {
         OffsetDateTime pastDue = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null, null);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null, null);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null);
 
         List<DueStep> result = scanner.scan();
 
@@ -154,9 +162,9 @@ class DueStepScannerIntegrationTest {
         OffsetDateTime middle = OffsetDateTime.now(ZoneOffset.UTC).minusHours(2);
         OffsetDateTime latest = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
 
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", latest, null, null);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", earliest, null, null);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", middle, null, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", latest, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", earliest, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", middle, null);
 
         List<DueStep> result = scanner.scan();
 
@@ -171,9 +179,9 @@ class DueStepScannerIntegrationTest {
         // than the batch size. The keyset (threshold, id) cursor must drain them
         // across cycles without skipping any (gap "c" closed by the id tie-break).
         OffsetDateTime sameDue = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null, null);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null, null);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", sameDue, null);
 
         SchedulerProperties smallBatch = new SchedulerProperties();
         smallBatch.setBatchSize(2);
@@ -194,7 +202,7 @@ class DueStepScannerIntegrationTest {
     @Test
     void scan_metadata_containsExpectedFields() {
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING",
-                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
 
         List<DueStep> result = scanner.scan();
 
@@ -205,14 +213,13 @@ class DueStepScannerIntegrationTest {
     }
 
     private void insertStep(UUID id, UUID protocolInstanceId, String state,
-                            OffsetDateTime dueDate, OffsetDateTime overdueDate,
-                            OffsetDateTime missedDate) {
+                            OffsetDateTime dueDate, OffsetDateTime missedDate) {
         jdbcTemplate.update("""
-                INSERT INTO step_instance (id, protocol_instance_id, action_id, repeat_index, 
-                    state, due_date, overdue_date, missed_date, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+                INSERT INTO step_instance (id, protocol_instance_id, action_id, repeat_index,
+                    state, due_date, missed_date, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
                 """,
                 id, protocolInstanceId, "action-1", 0,
-                state, dueDate, overdueDate, missedDate);
+                state, dueDate, missedDate);
     }
 }

@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
@@ -60,7 +61,7 @@ class DueStepScannerTest {
     @Test
     void scan_pendingStep_returnsPendingToDue() {
         StepInstance step = buildStepInstance(StepState.PENDING,
-                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
         when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
 
@@ -75,35 +76,34 @@ class DueStepScannerTest {
     }
 
     @Test
-    void scan_dueStep_returnsDueToOverdue() {
-        OffsetDateTime overdueDate = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(30);
-        StepInstance step = buildStepInstance(StepState.DUE, null, overdueDate, null);
+    void scan_dueStep_returnsDueToMissed() {
+        OffsetDateTime missedDate = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(30);
+        StepInstance step = buildStepInstance(StepState.DUE, null, missedDate);
         when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
 
         List<DueStep> result = scanner.scan();
 
-        assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.DUE_TO_OVERDUE);
-        assertThat(result.get(0).thresholdDate()).isEqualTo(overdueDate);
+        assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.DUE_TO_MISSED);
+        assertThat(result.get(0).thresholdDate()).isEqualTo(missedDate);
     }
 
     @Test
-    void scan_overdueStep_returnsOverdueToMissed() {
-        OffsetDateTime missedDate = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
-        StepInstance step = buildStepInstance(StepState.OVERDUE, null, null, missedDate);
+    void scan_legacyOverdueStep_rejected() {
+        StepInstance step = buildStepInstance(StepState.OVERDUE, null,
+                OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10));
         when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
 
-        List<DueStep> result = scanner.scan();
-
-        assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.OVERDUE_TO_MISSED);
-        assertThat(result.get(0).thresholdDate()).isEqualTo(missedDate);
+        assertThatThrownBy(() -> scanner.scan())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("OVERDUE");
     }
 
     @Test
     void scan_metadata_containsActionIdAndRepeatIndex() {
         StepInstance step = buildStepInstance(StepState.PENDING,
-                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
         when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
 
@@ -117,7 +117,7 @@ class DueStepScannerTest {
     @Test
     void scan_metadata_includesRequiredBehaviorWhenPresent() {
         StepInstance step = buildStepInstance(StepState.PENDING,
-                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
         setField(step, "requiredBehavior", "MUST");
         when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
@@ -129,7 +129,7 @@ class DueStepScannerTest {
     @Test
     void scan_metadata_omitsRequiredBehaviorWhenNull() {
         StepInstance step = buildStepInstance(StepState.PENDING,
-                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
         when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
                 .thenReturn(List.of(step));
 
@@ -139,20 +139,17 @@ class DueStepScannerTest {
     @Test
     void scan_multipleSteps_returnsAll() {
         StepInstance pending = buildStepInstance(StepState.PENDING,
-                OffsetDateTime.now(ZoneOffset.UTC).minusHours(2), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).minusHours(2), null);
         StepInstance due = buildStepInstance(StepState.DUE, null,
-                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
-        StepInstance overdue = buildStepInstance(StepState.OVERDUE, null, null,
-                OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(30));
+                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1));
         when(stepInstanceRepository.findDueSteps(any(), any(), any(), anyInt()))
-                .thenReturn(List.of(pending, due, overdue));
+                .thenReturn(List.of(pending, due));
 
         List<DueStep> result = scanner.scan();
 
-        assertThat(result).hasSize(3);
+        assertThat(result).hasSize(2);
         assertThat(result.get(0).transitionType()).isEqualTo(TransitionType.PENDING_TO_DUE);
-        assertThat(result.get(1).transitionType()).isEqualTo(TransitionType.DUE_TO_OVERDUE);
-        assertThat(result.get(2).transitionType()).isEqualTo(TransitionType.OVERDUE_TO_MISSED);
+        assertThat(result.get(1).transitionType()).isEqualTo(TransitionType.DUE_TO_MISSED);
     }
 
     @Test
@@ -172,7 +169,6 @@ class DueStepScannerTest {
 
     private StepInstance buildStepInstance(StepState state,
                                            OffsetDateTime dueDate,
-                                           OffsetDateTime overdueDate,
                                            OffsetDateTime missedDate) {
         StepInstance step = new StepInstance();
         setField(step, "id", UUID.randomUUID());
@@ -181,7 +177,6 @@ class DueStepScannerTest {
         setField(step, "repeatIndex", 0);
         setField(step, "state", state);
         setField(step, "dueDate", dueDate);
-        setField(step, "overdueDate", overdueDate);
         setField(step, "missedDate", missedDate);
         setField(step, "createdAt", OffsetDateTime.now(ZoneOffset.UTC));
         setField(step, "updatedAt", OffsetDateTime.now(ZoneOffset.UTC));

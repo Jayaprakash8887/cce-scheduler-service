@@ -109,7 +109,7 @@ src/main/java/org/openphc/cce/scheduler/
 │   │   ├── SchedulerLease.java               # Leader heartbeat entity (single row)
 │   │   ├── ScanCursor.java                   # Scan watermark entity (single cursor)
 │   │   └── enums/
-│   │       └── StepState.java                # PENDING, DUE, OVERDUE, MISSED, COMPLETED, SKIPPED
+│   │       └── StepState.java                # PENDING, DUE, MISSED, COMPLETED, SKIPPED (+ legacy OVERDUE)
 │   └── repository/
 │       ├── StepInstanceRepository.java       # Read-only query (watermark-bounded)
 │       ├── SchedulerLeaseRepository.java     # Lease upsert
@@ -271,9 +271,9 @@ The Scheduler connects to the **same PostgreSQL database** (`ccedb`) as all othe
 ### 7.3 Structured Logging
 
 ```
-correlationId: sched-DUE_TO_OVERDUE-770e8400
+correlationId: sched-DUE_TO_MISSED-770e8400
 stepInstanceId: 770e8400-e29b-41d4-a716-446655440002
-transitionType: DUE_TO_OVERDUE
+transitionType: DUE_TO_MISSED
 leaderStatus: leader
 ```
 

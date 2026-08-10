@@ -78,7 +78,7 @@ class SchedulerTriggerProducerTest {
     @Test
     void publishAll_correlationId_followsFormat() {
         UUID stepId = UUID.randomUUID();
-        DueStep dueStep = new DueStep(stepId, UUID.randomUUID(), TransitionType.DUE_TO_OVERDUE,
+        DueStep dueStep = new DueStep(stepId, UUID.randomUUID(), TransitionType.DUE_TO_MISSED,
                 OffsetDateTime.now(ZoneOffset.UTC), JsonNodeFactory.instance.objectNode());
 
         when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(ok());
@@ -88,7 +88,7 @@ class SchedulerTriggerProducerTest {
         ArgumentCaptor<SchedulerTriggerMessage> msgCaptor = ArgumentCaptor.forClass(SchedulerTriggerMessage.class);
         verify(producer).publish(any(), msgCaptor.capture());
 
-        String expectedPrefix = "sched-DUE_TO_OVERDUE-" + stepId.toString().substring(0, 8) + "-";
+        String expectedPrefix = "sched-DUE_TO_MISSED-" + stepId.toString().substring(0, 8) + "-";
         assertThat(msgCaptor.getValue().correlationId()).startsWith(expectedPrefix);
     }
 
@@ -96,9 +96,9 @@ class SchedulerTriggerProducerTest {
     void publishAll_multipleSteps_publishesEach() {
         DueStep step1 = new DueStep(UUID.randomUUID(), UUID.randomUUID(), TransitionType.PENDING_TO_DUE,
                 OffsetDateTime.now(ZoneOffset.UTC), JsonNodeFactory.instance.objectNode());
-        DueStep step2 = new DueStep(UUID.randomUUID(), UUID.randomUUID(), TransitionType.DUE_TO_OVERDUE,
+        DueStep step2 = new DueStep(UUID.randomUUID(), UUID.randomUUID(), TransitionType.DUE_TO_MISSED,
                 OffsetDateTime.now(ZoneOffset.UTC), JsonNodeFactory.instance.objectNode());
-        DueStep step3 = new DueStep(UUID.randomUUID(), UUID.randomUUID(), TransitionType.OVERDUE_TO_MISSED,
+        DueStep step3 = new DueStep(UUID.randomUUID(), UUID.randomUUID(), TransitionType.DUE_TO_MISSED,
                 OffsetDateTime.now(ZoneOffset.UTC), JsonNodeFactory.instance.objectNode());
 
         when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(ok());
@@ -134,7 +134,7 @@ class SchedulerTriggerProducerTest {
 
     @Test
     void publishAll_onSuccess_incrementsSuccessMetric() {
-        DueStep dueStep = new DueStep(UUID.randomUUID(), UUID.randomUUID(), TransitionType.OVERDUE_TO_MISSED,
+        DueStep dueStep = new DueStep(UUID.randomUUID(), UUID.randomUUID(), TransitionType.DUE_TO_MISSED,
                 OffsetDateTime.now(ZoneOffset.UTC), JsonNodeFactory.instance.objectNode());
 
         when(producer.publish(any(UUID.class), any(SchedulerTriggerMessage.class))).thenReturn(ok());
@@ -142,7 +142,7 @@ class SchedulerTriggerProducerTest {
         transitionPublisher.publishAll(List.of(dueStep));
 
         double successCount = meterRegistry.counter("cce.scheduler.publish.success",
-                "transition_type", "OVERDUE_TO_MISSED").count();
+                "transition_type", "DUE_TO_MISSED").count();
         assertThat(successCount).isEqualTo(1.0);
     }
 

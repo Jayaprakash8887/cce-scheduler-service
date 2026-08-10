@@ -56,9 +56,9 @@ spring:
 ```json
 {
   "stepInstanceId": "770e8400-e29b-41d4-a716-446655440002",
-  "transitionType": "DUE_TO_OVERDUE",
+  "transitionType": "DUE_TO_MISSED",
   "triggeredAt": "2026-03-25T00:00:00Z",
-  "correlationid": "sched-DUE_TO_OVERDUE-770e8400"
+  "correlationid": "sched-DUE_TO_MISSED-770e8400"
 }
 ```
 
@@ -67,7 +67,7 @@ spring:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `stepInstanceId` | UUID (String) | Yes | The `step_instance.id` that needs a state transition |
-| `transitionType` | String (enum) | Yes | One of: `PENDING_TO_DUE`, `DUE_TO_OVERDUE`, `OVERDUE_TO_MISSED` |
+| `transitionType` | String (enum) | Yes | One of: `PENDING_TO_DUE`, `DUE_TO_MISSED` |
 | `triggeredAt` | OffsetDateTime (ISO 8601) | Yes | Timestamp when the scan cycle detected the threshold crossing |
 | `correlationid` | String | Yes | Distributed tracing ID — format: `sched-{transitionType}-{stepId-prefix}` |
 
@@ -76,8 +76,9 @@ spring:
 | Value | Meaning | Compliance Service Effect |
 |---|---|---|
 | `PENDING_TO_DUE` | Step's `dueDate` has been reached | Update `step_instance.state` from `PENDING` to `DUE` |
-| `DUE_TO_OVERDUE` | Step's `overdueDate` has been reached | Update state to `OVERDUE`; create `deviation` record (type: `OVERDUE`); evaluate intelligence actions |
-| `OVERDUE_TO_MISSED` | Step's `missedDate` has been reached | For `must` steps: update state to `MISSED`, create `deviation` record (type: `MISSED`), evaluate intelligence actions. For `could` steps: update state to `SKIPPED` (no deviation). The Compliance Service decides based on `requiredBehavior`. |
+| `DUE_TO_MISSED` | Step's `missedDate` has been reached | For `must` steps: update state to `MISSED`, create `deviation` record (type: `MISSED`), evaluate intelligence actions. For `could` steps: update state to `SKIPPED` (no deviation). The Compliance Service decides based on `requiredBehavior`. |
+
+> **Removed:** `DUE_TO_OVERDUE` and `OVERDUE_TO_MISSED`. The Scheduler no longer emits either — a `DUE` step goes straight to `MISSED`/`SKIPPED` at `missedDate`, and the `OVERDUE` state is out of the lifecycle. Consumers should treat both values as unknown/ignorable.
 
 ---
 
@@ -96,27 +97,14 @@ spring:
 
 **Kafka Key:** `660e8400-e29b-41d4-a716-446655440001` (protocolInstanceId)
 
-### 4.2 DUE → OVERDUE
+### 4.2 DUE → MISSED
 
 ```json
 {
   "stepInstanceId": "770e8400-e29b-41d4-a716-446655440002",
-  "transitionType": "DUE_TO_OVERDUE",
-  "triggeredAt": "2026-03-25T00:00:05Z",
-  "correlationid": "sched-DUE_TO_OVERDUE-770e8400"
-}
-```
-
-**Kafka Key:** `660e8400-e29b-41d4-a716-446655440001` (protocolInstanceId)
-
-### 4.3 OVERDUE → MISSED
-
-```json
-{
-  "stepInstanceId": "880e8400-e29b-41d4-a716-446655440003",
-  "transitionType": "OVERDUE_TO_MISSED",
+  "transitionType": "DUE_TO_MISSED",
   "triggeredAt": "2026-04-01T00:00:05Z",
-  "correlationid": "sched-OVERDUE_TO_MISSED-880e8400"
+  "correlationid": "sched-DUE_TO_MISSED-770e8400"
 }
 ```
 
@@ -135,8 +123,8 @@ The Compliance Service consumes from `cce.scheduler.triggers` with these expecta
 | 3 | Idempotent processing | Duplicate messages for the same step+transition produce no side effects |
 | 4 | Kafka key = `protocolInstanceId` | Ensures per-protocol ordering within a partition |
 | 5 | `correlationid` for tracing | Propagated to MDC for structured logging |
-| 6 | `requiredBehavior` determines terminal state | On `OVERDUE_TO_MISSED`: `must` → `MISSED` + deviation; `could` → `SKIPPED` (no deviation) |
-| 7 | Intelligence action evaluation | On deviation creation (`DUE_TO_OVERDUE`, `OVERDUE_TO_MISSED`), the Compliance Service evaluates PlanDefinition intelligence actions and publishes `IntelligenceTriggerEvent` to `cce.intelligence.triggers` |
+| 6 | `requiredBehavior` determines terminal state | On `DUE_TO_MISSED`: `must` → `MISSED` + deviation; `could` → `SKIPPED` (no deviation) |
+| 7 | Intelligence action evaluation | On deviation creation (`DUE_TO_MISSED`), the Compliance Service evaluates PlanDefinition intelligence actions and publishes `IntelligenceTriggerEvent` to `cce.intelligence.triggers` |
 
 ---
 

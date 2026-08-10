@@ -110,7 +110,7 @@ class SchedulerLoopIntegrationTest {
         UUID protocolId = UUID.randomUUID();
         UUID stepId = UUID.randomUUID();
         insertStep(stepId, protocolId, "PENDING",
-                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
 
         schedulerLoop.executeCycle();
 
@@ -124,26 +124,10 @@ class SchedulerLoopIntegrationTest {
     }
 
     @Test
-    void fullCycle_dueStep_publishesDueToOverdue() throws Exception {
+    void fullCycle_dueStep_publishesDueToMissed() throws Exception {
         UUID protocolId = UUID.randomUUID();
         UUID stepId = UUID.randomUUID();
         insertStep(stepId, protocolId, "DUE",
-                OffsetDateTime.now(ZoneOffset.UTC).minusDays(1),
-                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1), null);
-
-        schedulerLoop.executeCycle();
-
-        ConsumerRecord<String, String> record = pollSingleRecord();
-        JsonNode value = objectMapper.readTree(record.value());
-        assertThat(value.get("transitionType").asText()).isEqualTo("DUE_TO_OVERDUE");
-    }
-
-    @Test
-    void fullCycle_overdueStep_publishesOverdueToMissed() throws Exception {
-        UUID protocolId = UUID.randomUUID();
-        UUID stepId = UUID.randomUUID();
-        insertStep(stepId, protocolId, "OVERDUE",
-                OffsetDateTime.now(ZoneOffset.UTC).minusDays(2),
                 OffsetDateTime.now(ZoneOffset.UTC).minusDays(1),
                 OffsetDateTime.now(ZoneOffset.UTC).minusHours(1));
 
@@ -151,13 +135,26 @@ class SchedulerLoopIntegrationTest {
 
         ConsumerRecord<String, String> record = pollSingleRecord();
         JsonNode value = objectMapper.readTree(record.value());
-        assertThat(value.get("transitionType").asText()).isEqualTo("OVERDUE_TO_MISSED");
+        assertThat(value.get("stepInstanceId").asText()).isEqualTo(stepId.toString());
+        assertThat(value.get("transitionType").asText()).isEqualTo("DUE_TO_MISSED");
+    }
+
+    @Test
+    void fullCycle_legacyOverdueStep_neverPublished() {
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "OVERDUE",
+                OffsetDateTime.now(ZoneOffset.UTC).minusDays(2),
+                OffsetDateTime.now(ZoneOffset.UTC).minusHours(1));
+
+        schedulerLoop.executeCycle();
+
+        ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(3));
+        assertThat(records.count()).isEqualTo(0);
     }
 
     @Test
     void fullCycle_completedStep_neverPublished() {
         insertStep(UUID.randomUUID(), UUID.randomUUID(), "COMPLETED",
-                OffsetDateTime.now(ZoneOffset.UTC).minusDays(1), null, null);
+                OffsetDateTime.now(ZoneOffset.UTC).minusDays(1), null);
 
         schedulerLoop.executeCycle();
 
@@ -176,9 +173,9 @@ class SchedulerLoopIntegrationTest {
     @Test
     void fullCycle_multipleSteps_allPublished() {
         OffsetDateTime pastDue = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null, null);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null, null);
-        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null);
+        insertStep(UUID.randomUUID(), UUID.randomUUID(), "PENDING", pastDue, null);
 
         schedulerLoop.executeCycle();
 
@@ -187,15 +184,14 @@ class SchedulerLoopIntegrationTest {
     }
 
     private void insertStep(UUID id, UUID protocolInstanceId, String state,
-                            OffsetDateTime dueDate, OffsetDateTime overdueDate,
-                            OffsetDateTime missedDate) {
+                            OffsetDateTime dueDate, OffsetDateTime missedDate) {
         jdbcTemplate.update("""
                 INSERT INTO step_instance (id, protocol_instance_id, action_id, repeat_index,
-                    state, due_date, overdue_date, missed_date, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+                    state, due_date, missed_date, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
                 """,
                 id, protocolInstanceId, "action-1", 0,
-                state, dueDate, overdueDate, missedDate);
+                state, dueDate, missedDate);
     }
 
     private ConsumerRecord<String, String> pollSingleRecord() {

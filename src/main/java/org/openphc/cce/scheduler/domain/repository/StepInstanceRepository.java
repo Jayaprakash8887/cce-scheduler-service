@@ -18,15 +18,12 @@ public interface StepInstanceRepository extends JpaRepository<StepInstance, UUID
             WHERE (
                 (s.state = 'PENDING' AND s.due_date <= :now
                     AND (s.due_date > :watermark OR (s.due_date = :watermark AND s.id > :watermarkId)))
-                OR (s.state = 'DUE' AND s.overdue_date <= :now
-                    AND (s.overdue_date > :watermark OR (s.overdue_date = :watermark AND s.id > :watermarkId)))
-                OR (s.state = 'OVERDUE' AND s.missed_date <= :now
+                OR (s.state = 'DUE' AND s.missed_date <= :now
                     AND (s.missed_date > :watermark OR (s.missed_date = :watermark AND s.id > :watermarkId)))
             )
             ORDER BY (CASE s.state
                 WHEN 'PENDING' THEN s.due_date
-                WHEN 'DUE' THEN s.overdue_date
-                WHEN 'OVERDUE' THEN s.missed_date
+                WHEN 'DUE' THEN s.missed_date
             END) ASC, s.id ASC
             LIMIT :batchSize
             """, nativeQuery = true)
